@@ -3,6 +3,7 @@ package com.aurora.ai.agent.service;
 import com.aurora.ai.agent.domain.ChatRun;
 import com.aurora.ai.agent.domain.Conversation;
 import com.aurora.ai.agent.domain.GenerationTask;
+import com.aurora.ai.agent.domain.Message;
 import com.aurora.ai.agent.mapper.ChatRunMapper;
 import com.aurora.ai.agent.mapper.ConversationMapper;
 import com.aurora.ai.domain.SysAiModel;
@@ -14,6 +15,11 @@ import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.SimpleTransactionStatus;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -26,13 +32,18 @@ class ChatRunServiceTest {
     private final ChatRunMapper mapper = mock(ChatRunMapper.class);
     private final ConversationMapper conversations = mock(ConversationMapper.class);
     private final IGenerationTaskService generations = mock(IGenerationTaskService.class);
-    private final ChatRunService service = new ChatRunService(mapper, conversations, generations, new ObjectMapper());
+    private final IMessageService messages = mock(IMessageService.class);
+    private final ObjectMapper json = new ObjectMapper();
+    private final PlatformTransactionManager transactions = mock(PlatformTransactionManager.class);
+    private final ChatRunService service = new ChatRunService(mapper, conversations, generations, messages, json, transactions);
 
     @BeforeEach
     void initializeLambdaMetadata() {
         var assistant = new MapperBuilderAssistant(new MybatisConfiguration(), "");
         TableInfoHelper.initTableInfo(assistant, ChatRun.class);
         TableInfoHelper.initTableInfo(assistant, Conversation.class);
+        when(transactions.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+        when(conversations.selectOwnedForUpdate(11L, 7L)).thenReturn(new Conversation());
     }
 
     @Test
@@ -119,8 +130,151 @@ class ChatRunServiceTest {
         when(mapper.update(isNull(), any())).thenReturn(1);
         service.maintainRuns();
         assertEquals("INTERRUPTED", stale.getStatus());
-        verifyNoInteractions(generations);
+        verify(generations).listBySourceMessage(7L, 11L, 21L);
+        verifyNoMoreInteractions(generations);
+        verifyNoInteractions(messages);
         verify(mapper, never()).insert(any(ChatRun.class));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CANCELLED", "FAILED", "INTERRUPTED", "WAITING_CONFIRMATION"})
+    void unfinishedImagesKeepRunBusyAndRestoreOriginalTextOutcomeAfterImagesFinish(String outcome) {
+        ChatRun run = run("RUNNING");
+        GenerationTask task = new GenerationTask();
+        task.setTaskId("task-old");
+        task.setStatus("QUEUED");
+        when(generations.listBySourceMessage(7L, 11L, 21L)).thenReturn(List.of(task));
+        when(mapper.selectOne(any())).thenReturn(run);
+
+        service.finish(run, outcome);
+        assertEquals("GENERATING", service.getOwned(7L, 11L).getStatus());
+        assertEquals(outcome, run.getCompletionStatus());
+        assertEquals("task-old", service.getOwned(7L, 11L).getGenerationTasks().get(0).getTaskId());
+
+        task.setStatus("SUCCEEDED");
+        assertEquals(outcome, service.getOwned(7L, 11L).getStatus());
+        assertEquals(outcome, run.getCompletionStatus());
+    }
+
+    @Test
+    void oldTerminalRunCannotBeReplacedWhileItsSubmittedImagesRemainActive() {
+        when(conversations.selectOwnedForUpdate(11L, 7L)).thenReturn(new Conversation());
+        ChatRun legacy = run("CANCELLED");
+        GenerationTask pending = new GenerationTask();
+        pending.setStatus("RUNNING");
+        when(mapper.selectOne(any())).thenReturn(null, legacy);
+        when(generations.listBySourceMessage(7L, 11L, 21L)).thenReturn(List.of(pending));
+
+        assertThrows(ServiceException.class,
+                () -> service.reserve(7L, 11L, "request-2", "hash-2", model(), 20L, null));
+
+        assertEquals("GENERATING", legacy.getStatus());
+        assertEquals("CANCELLED", legacy.getCompletionStatus());
+        verify(mapper, never()).insert(any(ChatRun.class));
+    }
+
+    @Test
+    void interruptedImagesArePersistedInHistoryBeforeAReplacementRunCanStart() throws Exception {
+        ChatRun stale = run("RUNNING");
+        stale.setHeartbeatTime(LocalDateTime.now().minusMinutes(5));
+        GenerationTask task = new GenerationTask();
+        task.setTaskId("task-before-restart");
+        task.setN(2);
+        task.setStatus("RUNNING");
+        when(generations.listBySourceMessage(7L, 11L, 21L)).thenReturn(List.of(task));
+        when(mapper.selectList(any())).thenReturn(List.of(stale), List.of(stale));
+        when(mapper.update(isNull(), any())).thenReturn(1);
+        Message recovered = new Message();
+        recovered.setId(22L);
+        when(messages.saveMessage(eq(11L), eq(7L), eq("assistant"), anyString(), eq("structured"),
+                anyString(), isNull(), isNull())).thenReturn(recovered);
+
+        service.maintainRuns();
+
+        assertEquals("GENERATING", stale.getStatus());
+        assertEquals("INTERRUPTED", stale.getCompletionStatus());
+        assertEquals(22L, stale.getAssistantMessageId());
+        ArgumentCaptor<String> media = ArgumentCaptor.forClass(String.class);
+        verify(messages).saveMessage(eq(11L), eq(7L), eq("assistant"), anyString(), eq("structured"),
+                media.capture(), isNull(), isNull());
+        var savedImages = json.readTree(media.getValue());
+        assertEquals("task-before-restart", savedImages.get(0).path("taskId").asText());
+        assertEquals(2, savedImages.get(1).path("seq").asInt());
+
+        task.setStatus("SUCCEEDED");
+        when(mapper.selectOne(any())).thenReturn(stale);
+        assertEquals("INTERRUPTED", service.getOwned(7L, 11L).getStatus());
+        when(conversations.selectOwnedForUpdate(11L, 7L)).thenReturn(new Conversation());
+        when(mapper.selectOne(any())).thenReturn(null, stale);
+        when(mapper.insert(any(ChatRun.class))).thenAnswer(invocation -> {
+            ((ChatRun) invocation.getArgument(0)).setId(2L);
+            return 1;
+        });
+        assertTrue(service.reserve(7L, 11L, "request-2", "hash-2", model(), 20L, null).created());
+        assertEquals("task-before-restart", json.readTree(media.getValue()).get(1).path("taskId").asText());
+        verify(messages, times(1)).saveMessage(anyLong(), anyLong(), anyString(), anyString(),
+                anyString(), anyString(), isNull(), isNull());
+    }
+
+    @Test
+    void unsuccessfulStaleRunClaimDoesNotCreateDuplicateHistory() {
+        ChatRun stale = run("RUNNING");
+        stale.setHeartbeatTime(LocalDateTime.now().minusMinutes(5));
+        GenerationTask task = new GenerationTask();
+        task.setStatus("RUNNING");
+        when(generations.listBySourceMessage(7L, 11L, 21L)).thenReturn(List.of(task));
+        when(mapper.selectList(any())).thenReturn(List.of(stale), List.of());
+        when(mapper.update(isNull(), any())).thenReturn(0);
+
+        service.maintainRuns();
+
+        verifyNoInteractions(messages);
+        verify(conversations, never()).update(isNull(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void errorEventKeepsConversationReservedUntilWorkerFinalization(boolean needsRecharge) {
+        ChatRun active = run("RUNNING");
+        AgentSseEvent error = needsRecharge
+                ? AgentSseEvent.error("请充值", "INSUFFICIENT_BEANS", "RECHARGE")
+                : AgentSseEvent.error("对话出错了");
+        String expected = needsRecharge ? "WAITING_RECHARGE" : "FAILED";
+
+        service.observe(active, error);
+        assertEquals("RUNNING", active.getStatus());
+        assertEquals(expected, active.getCompletionStatus());
+        when(mapper.selectOne(any())).thenReturn(active);
+        assertEquals("RUNNING", service.getOwned(7L, 11L).getStatus());
+        verify(mapper, times(1)).updateById(active);
+        when(mapper.selectOne(any())).thenReturn(null, active);
+        assertThrows(ServiceException.class,
+                () -> service.reserve(7L, 11L, "request-2", "hash-2", model(), 20L, null));
+        verify(mapper, never()).insert(any(ChatRun.class));
+
+        service.finish(active, "COMPLETED");
+        assertEquals(expected, active.getStatus());
+        assertEquals(error.getMessage(), active.getErrorMessage());
+    }
+
+    @Test
+    void recoveryHistoryFailureRollsBackTheInterruptedRunClaim() {
+        ChatRun stale = run("RUNNING");
+        stale.setHeartbeatTime(LocalDateTime.now().minusMinutes(5));
+        GenerationTask task = new GenerationTask();
+        task.setTaskId("task-before-restart");
+        task.setStatus("RUNNING");
+        when(generations.listBySourceMessage(7L, 11L, 21L)).thenReturn(List.of(task));
+        when(mapper.selectList(any())).thenReturn(List.of(stale));
+        when(mapper.update(isNull(), any())).thenReturn(1);
+        when(messages.saveMessage(anyLong(), anyLong(), anyString(), anyString(), anyString(), anyString(),
+                isNull(), isNull())).thenThrow(new IllegalStateException("database unavailable"));
+
+        assertThrows(IllegalStateException.class, service::maintainRuns);
+
+        verify(transactions).rollback(any());
+        verify(transactions, never()).commit(any());
+        verify(conversations, never()).update(isNull(), any());
     }
 
     private ChatRun run(String status) {

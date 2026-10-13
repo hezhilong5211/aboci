@@ -349,7 +349,9 @@ public class AgentService {
         if (!run.cleaned.compareAndSet(false, true)) return;
         if (chatRunService != null && run.persisted != null) {
             String status = run.cancelled.get() ? "CANCELLED" : run.persisted.getStatus();
-            if ("QUEUED".equals(status) || "RUNNING".equals(status)) status = "FAILED";
+            if ("QUEUED".equals(status) || "RUNNING".equals(status)) {
+                status = run.persisted.getCompletionStatus() == null ? "FAILED" : run.persisted.getCompletionStatus();
+            }
             try { chatRunService.finish(run.persisted, status); }
             catch (Exception e) { log.error("运行状态收尾失败: runId={}", run.persisted.getId(), e); }
         }
@@ -644,7 +646,7 @@ public class AgentService {
                         userId, conversation == null ? null : conversation.getId(), collectedImages.size());
                 if (conversation != null && messageId != null) {
                     Message stoppedMessage = persistAssistant(conversation.getId(), userId,
-                            "对话已停止", null, List.of(), null);
+                            "对话已停止", terminationResult("对话已停止", collectedImages), collectedImages, null);
                     if (chatRunService != null && stoppedMessage != null) {
                         chatRunService.bindAssistant(activeRun.persisted, stoppedMessage.getId());
                     }
@@ -672,7 +674,7 @@ public class AgentService {
             if (!settled && !(e instanceof InsufficientBeanException) && conversation != null && messageId != null) {
                 try {
                     Message failure = persistAssistant(conversation.getId(), userId, failureMessage,
-                            mergeImages(null, collectedImages), collectedImages, null);
+                            terminationResult(failureMessage, collectedImages), collectedImages, null);
                     if (chatRunService != null && failure != null) {
                         chatRunService.bindAssistant(activeRun.persisted, failure.getId());
                     }
@@ -2132,6 +2134,12 @@ public class AgentService {
             }
             result.setImages(collectedImages);
         }
+        return result;
+    }
+
+    private AgentResult terminationResult(String message, List<AgentResult.ImageRef> images) {
+        AgentResult result = mergeImages(null, images);
+        if (result != null) result.setBody(message);
         return result;
     }
 

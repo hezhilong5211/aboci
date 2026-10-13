@@ -3,6 +3,7 @@ package com.aurora.ai.agent.service;
 import com.aurora.ai.agent.domain.ChatRun;
 import com.aurora.ai.agent.domain.Conversation;
 import com.aurora.ai.agent.domain.GenerationTask;
+import com.aurora.ai.agent.domain.Message;
 import com.aurora.ai.agent.dto.ChatRunVO;
 import com.aurora.ai.agent.dto.GenerationTaskVO;
 import com.aurora.ai.agent.mapper.ChatRunMapper;
@@ -21,8 +22,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -37,7 +41,9 @@ public class ChatRunService {
     private final ChatRunMapper mapper;
     private final ConversationMapper conversationMapper;
     private final IGenerationTaskService generationTaskService;
+    private final IMessageService messageService;
     private final ObjectMapper objectMapper;
+    private final PlatformTransactionManager transactionManager;
     private final Map<Long, ChatRun> localRuns = new ConcurrentHashMap<>();
     private final Map<Long, Long> lastFlush = new ConcurrentHashMap<>();
 
@@ -118,7 +124,7 @@ public class ChatRunService {
             if ("clarification".equals(event.getType())) run.setClarificationJson(json(event.getClarification()));
             if ("error".equals(event.getType())) {
                 run.setErrorMessage(event.getMessage());
-                run.setStatus("INSUFFICIENT_BEANS".equals(event.getErrorCode())
+                run.setCompletionStatus("INSUFFICIENT_BEANS".equals(event.getErrorCode())
                         ? "WAITING_RECHARGE" : "FAILED");
             }
             long now = System.currentTimeMillis();
@@ -131,11 +137,13 @@ public class ChatRunService {
     public void finish(ChatRun run, String status) {
         if (run == null) return;
         synchronized (run) {
-            if ("COMPLETED".equals(status) && Set.of("FAILED", "WAITING_RECHARGE").contains(run.getStatus())) {
-                status = run.getStatus();
+            String observedOutcome = run.getCompletionStatus() == null ? run.getStatus() : run.getCompletionStatus();
+            if ("COMPLETED".equals(status) && Set.of("FAILED", "WAITING_RECHARGE").contains(observedOutcome)) {
+                status = observedOutcome;
             }
             run.setStatus(status);
-            if ("COMPLETED".equals(status)) refreshGenerationState(run);
+            if (!BUSY.contains(status)) run.setCompletionStatus(status);
+            refreshGenerationState(run);
             flush(run);
             updateConversation(run);
         }
@@ -201,14 +209,25 @@ public class ChatRunService {
                 .in(ChatRun::getStatus, "QUEUED", "RUNNING")
                 .lt(ChatRun::getHeartbeatTime, stale).last("LIMIT 200"));
         for (ChatRun run : abandoned) {
-            run.setStatus("INTERRUPTED");
-            run.setErrorMessage("服务重启导致本轮中断，已提交的图片任务仍可查询；请重新发起对话");
-            int changed = mapper.update(null, new LambdaUpdateWrapper<ChatRun>()
-                    .eq(ChatRun::getId, run.getId()).in(ChatRun::getStatus, "QUEUED", "RUNNING")
-                    .lt(ChatRun::getHeartbeatTime, stale)
-                    .set(ChatRun::getStatus, run.getStatus()).set(ChatRun::getErrorMessage, run.getErrorMessage())
-                    .set(ChatRun::getUpdateTime, LocalDateTime.now()));
-            if (changed == 1) updateConversation(run);
+            new TransactionTemplate(transactionManager).executeWithoutResult(ignored -> {
+                // Reservation and recovery acquire the conversation lock before the run lock.
+                if (conversationMapper.selectOwnedForUpdate(run.getConversationId(), run.getUserId()) == null) return;
+                run.setStatus("INTERRUPTED");
+                run.setCompletionStatus("INTERRUPTED");
+                run.setErrorMessage("服务重启导致本轮中断，已提交的图片任务仍可查询；请重新发起对话");
+                List<GenerationTask> submitted = tasks(run);
+                refreshGenerationState(run, submitted);
+                int changed = mapper.update(null, new LambdaUpdateWrapper<ChatRun>()
+                        .eq(ChatRun::getId, run.getId()).in(ChatRun::getStatus, "QUEUED", "RUNNING")
+                        .lt(ChatRun::getHeartbeatTime, stale)
+                        .set(ChatRun::getStatus, run.getStatus()).set(ChatRun::getCompletionStatus, run.getCompletionStatus())
+                        .set(ChatRun::getErrorMessage, run.getErrorMessage())
+                        .set(ChatRun::getUpdateTime, LocalDateTime.now()));
+                if (changed == 1) {
+                    persistInterruptedImages(run, submitted);
+                    updateConversation(run);
+                }
+            });
         }
         mapper.selectList(new LambdaQueryWrapper<ChatRun>().eq(ChatRun::getStatus, "GENERATING")
                 .orderByAsc(ChatRun::getUpdateTime).last("LIMIT 200")).forEach(this::refresh);
@@ -221,8 +240,11 @@ public class ChatRunService {
     }
 
     private ChatRun refresh(ChatRun run) {
-        if (!"GENERATING".equals(run.getStatus())) return run;
+        if (Set.of("QUEUED", "RUNNING").contains(run.getStatus())) return run;
         String previous = run.getStatus();
+        if (run.getCompletionStatus() == null) {
+            run.setCompletionStatus("GENERATING".equals(previous) ? "COMPLETED" : previous);
+        }
         refreshGenerationState(run);
         if (!previous.equals(run.getStatus())) {
             flush(run);
@@ -232,11 +254,42 @@ public class ChatRunService {
     }
 
     private void refreshGenerationState(ChatRun run) {
-        List<GenerationTask> tasks = tasks(run);
+        refreshGenerationState(run, tasks(run));
+    }
+
+    private void refreshGenerationState(ChatRun run, List<GenerationTask> tasks) {
         if (tasks.isEmpty()) return;
         boolean pending = tasks.stream().anyMatch(task -> Set.of("CREATED", "QUEUED", "RUNNING").contains(task.getStatus()));
         boolean failed = tasks.stream().anyMatch(task -> Set.of("FAILED", "CANCELLED").contains(task.getStatus()));
-        run.setStatus(pending ? "GENERATING" : failed ? "FAILED" : "COMPLETED");
+        if (pending) {
+            run.setStatus("GENERATING");
+        } else {
+            String completion = run.getCompletionStatus();
+            run.setStatus(completion != null && !"COMPLETED".equals(completion)
+                    ? completion : failed ? "FAILED" : "COMPLETED");
+        }
+    }
+
+    private void persistInterruptedImages(ChatRun run, List<GenerationTask> tasks) {
+        if (run.getAssistantMessageId() != null || tasks.isEmpty()) return;
+        List<AgentResult.ImageRef> images = new ArrayList<>();
+        for (GenerationTask task : tasks) {
+            for (int seq = 1; seq <= (task.getN() == null ? 1 : task.getN()); seq++) {
+                AgentResult.ImageRef image = new AgentResult.ImageRef();
+                image.setTaskId(task.getTaskId());
+                image.setSeq(seq);
+                images.add(image);
+            }
+        }
+        AgentResult result = new AgentResult();
+        result.setBody(run.getErrorMessage());
+        result.setImages(images);
+        Message recovered = messageService.saveMessage(run.getConversationId(), run.getUserId(),
+                "assistant", json(result), "structured", json(images), null, null);
+        run.setAssistantMessageId(recovered.getId());
+        run.setResultJson(json(result));
+        mapper.update(null, new LambdaUpdateWrapper<ChatRun>().eq(ChatRun::getId, run.getId())
+                .set(ChatRun::getAssistantMessageId, recovered.getId()).set(ChatRun::getResultJson, run.getResultJson()));
     }
 
     private List<GenerationTask> tasks(ChatRun run) {

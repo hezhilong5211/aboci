@@ -1,0 +1,56 @@
+[
+  {
+    "conversationId": 7,
+    "requestId": "req-mv6fj1su-dlvbsf6c",
+    "status": "COMPLETED",
+    "task": {
+      "taskId": "12922eabb75a36cab1a8c6b660976d21",
+      "status": "SUCCEEDED",
+      "n": 1,
+      "successCount": 1,
+      "resultUrls": [
+        "/profile/generated/42165005-c49d-4ef9-9346-73f9cd168bff.png"
+      ],
+      "previewUrls": [
+        "/profile/generated/42165005-c49d-4ef9-9346-73f9cd168bff.preview.jpg"
+      ],
+      "errorMsg": null,
+      "modelId": 14,
+      "modelName": "GPT Image 2.5 Flare (Luxai)",
+      "resolution": "1K",
+      "aspectRatio": "1:1",
+      "beanPerImage": 6,
+      "prepaidBeans": 6,
+      "beanCost": 6
+    },
+    "ledger": "DEDUCT\timg:12922eabb75a36cab1a8c6b660976d21\t-6\nDEDUCT\tmsg:105\t-1",
+    "replayNoExtraDebit": true
+  },
+  {
+    "conversationId": 8,
+    "requestId": "req-mv6flg01-z8huvkcf",
+    "status": "COMPLETED",
+    "task": {
+      "taskId": "f0840e0131093188a53a8c6656f1378e",
+      "status": "SUCCEEDED",
+      "n": 1,
+      "successCount": 1,
+      "resultUrls": [
+        "/profile/generated/c4dc3fd0-5b9c-4022-8910-93fe6744f18e.png"
+      ],
+      "previewUrls": [
+        "/profile/generated/c4dc3fd0-5b9c-4022-8910-93fe6744f18e.preview.jpg"
+      ],
+      "errorMsg": null,
+      "modelId": 14,
+      "modelName": "GPT Image 2.5 Flare (Luxai)",
+      "resolution": "1K",
+      "aspectRatio": "1:1",
+      "beanPerImage": 6,
+      "prepaidBeans": 6,
+      "beanCost": 6
+    },
+    "ledger": "DEDUCT\timg:f0840e0131093188a53a8c6656f1378e\t-6\nDEDUCT\tmsg:107\t-1",
+    "replayNoExtraDebit": true
+  }
+]

@@ -92,6 +92,32 @@ class AgentChatControllerMessagePageTest {
         verify(messageService, never()).listBefore(33L, null, 31);
     }
 
+    @Test
+    void priorTerminatedRunImagesRemainVisibleAfterANewRunBecomesLatest() throws Exception {
+        Conversation conversation = new Conversation();
+        conversation.setRunId("new-request");
+        conversation.setRunStatus("COMPLETED");
+        when(conversationService.getOwned(33L, 7L)).thenReturn(conversation);
+        Message stopped = message(22L, "assistant", "[{\"taskId\":\"task-old\",\"seq\":2}]");
+        stopped.setContentType("structured");
+        stopped.setContent("{\"body\":\"对话已停止\",\"images\":[{\"taskId\":\"task-old\",\"seq\":2}]}");
+        Message later = message(32L, "assistant", null);
+        when(messageService.listBefore(33L, null, 31)).thenReturn(List.of(stopped, later));
+        GenerationTask task = new GenerationTask();
+        task.setTaskId("task-old");
+        task.setResultUrls("[null,\"/profile/generated/old-second.png\"]");
+        when(generationTaskService.mapByTaskIds(anySet())).thenReturn(Map.of("task-old", task));
+
+        Result<MessagePageVO> result = controller.messagePage(33L, null, 30, 7L);
+
+        assertThat(result.getData().getRecords()).hasSize(2);
+        assertThat(objectMapper.readTree(result.getData().getRecords().get(0).getContent()).path("body").asText())
+                .isEqualTo("对话已停止");
+        JsonNode oldMedia = objectMapper.readTree(result.getData().getRecords().get(0).getMedia());
+        assertThat(oldMedia.get(0).path("seq").asInt()).isEqualTo(2);
+        assertThat(oldMedia.get(0).path("url").asText()).isEqualTo("/profile/generated/old-second.png");
+    }
+
     private Message message(Long id, String role, String media) {
         Message message = new Message();
         message.setId(id);

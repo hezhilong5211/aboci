@@ -22,6 +22,7 @@ public class ChatRun {
     private Long imageModelId;
     private String billingSnapshot;
     private String status;
+    private String completionStatus;
     private String text;
     private String thinking;
     private String resultJson;

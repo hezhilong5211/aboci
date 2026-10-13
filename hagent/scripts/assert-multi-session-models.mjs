@@ -278,6 +278,111 @@ await check('最低余额不足且尚无assistant时仍续作已保存的原消�
 	assert.equal(submitted.sourceMessageId, 705); assert.equal(submitted.message, undefined)
 	assert.equal(submitted.clarificationScopeId, undefined); assert.equal(session.messages.length, 1)
 })
+await check('切换 A→B→A 和新建会话保留两个实时流，不中断或重拉覆盖消息', async () => {
+	const a = store.getSession(801), b = store.getSession(802)
+	a.messages = [{ role: 'assistant', text: 'A partial' }]; b.messages = [{ role: 'assistant', text: 'B partial' }]
+	a.streaming = true; b.streaming = true
+	const streams = new Map([['801', { abort() { throw Error('A must continue') } }], ['802', { abort() { throw Error('B must continue') } }]])
+	const scope = vm.createContext({ conversationStore: store, streams, disposed: false, sessionEpoch: 0, historySwitchVersion: 0,
+		historyCursor: ref(null), historyHasMore: ref(false), restoreInputDraft() {}, scrollToBottom() {}, uni,
+		getMessagePage() { throw Error('must preserve active stream messages') },
+		preparingConversation: ref(false), newConversationSwitching: ref(false), historyOlderLoading: ref(false),
+		scrollCommandVersion: 0, scrollIntoView: ref(''), saveInputDraft() {}, commandScrollTop() {}, nextTick: async () => {}, revealPreparedConversation: async () => {},
+	})
+	vm.runInContext(fn('loadConversation') + '\n' + fn('onHistoryNew'), scope)
+	assert.equal(await scope.loadConversation(801), true); const liveA = store.messages[0]
+	assert.equal(await scope.loadConversation(802), true); b.messages[0].text += ' done'
+	assert.equal(await scope.loadConversation(801), true); assert.equal(store.messages[0], liveA)
+	await scope.onHistoryNew()
+	assert.equal(store.conversationId, null); assert.equal(a.streaming, true); assert.equal(b.streaming, true)
+	assert.equal(streams.size, 2); assert.equal(b.messages[0].text, 'B partial done')
+})
+await check('恢复查询锁按会话隔离，失败释放；旧查询结束不释放新查询的锁', async () => {
+	store.setConversationId(803)
+	const session = store.getSession(803), other = store.getSession(804)
+	const deferred = [], scope = vm.createContext({ conversationStore: store, streams: new Map(), disposed: false, sessionEpoch: 0, historySwitchVersion: 0,
+		getMessagePage: () => new Promise((resolve, reject) => deferred.push({ resolve, reject })),
+		getPendingClarification: async () => null, getConversationRun: async () => null, uni,
+		applyConversationSnapshot() {}, applyRunSnapshot() {}, ACTIVE_RUN_STATES: new Set(), startConversationSync() {},
+		historyCursor: ref(null), historyHasMore: ref(false), restoreInputDraft() {}, scrollToBottom() {},
+	})
+	vm.runInContext(fn('loadConversation'), scope)
+	const old = scope.loadConversation(803); assert.equal(session.loadingHistory, true); assert.notEqual(other.loadingHistory, true)
+	const newer = scope.loadConversation(803); deferred[0].reject(Error('old timeout'))
+	assert.equal(await old, false); assert.equal(session.loadingHistory, true)
+	deferred[1].reject(Error('new timeout')); assert.equal(await newer, false); assert.equal(session.loadingHistory, false)
+	assert.match(script, /conversationStore.currentSession.loadingHistory === true/)
+})
+await check('旧账号列表失败与同账号乱序响应不清空或覆盖最新列表状态', async () => {
+	const jobs = []
+	const scope = vm.createContext({ conversationStore: store, streams: new Map(), disposed: false, sessionEpoch: 0,
+		conversationListVersion: 0, historyLoading: ref(false), conversationRecords: ref([]), sameId: ctx.sameId,
+		listConversations: () => new Promise((resolve, reject) => jobs.push({ resolve, reject })),
+	})
+	vm.runInContext(fn('loadConversations'), scope)
+	const old = scope.loadConversations(); scope.sessionEpoch = 1; const fresh = scope.loadConversations()
+	jobs[1].resolve({ records: [{ conversationId: 811, runId: 'new', runStatus: 'GENERATING' }] }); await fresh
+	jobs[0].reject(Error('old account failed')); await old
+	assert.equal(scope.conversationRecords.value[0].conversationId, 811); assert.equal(scope.historyLoading.value, false)
+	const first = scope.loadConversations(), second = scope.loadConversations()
+	jobs[3].resolve({ records: [{ conversationId: 812, runStatus: 'COMPLETED' }] }); await second
+	jobs[2].resolve({ records: [{ conversationId: 811, runStatus: 'RUNNING' }] }); await first
+	assert.equal(scope.conversationRecords.value[0].conversationId, 812)
+})
+await check('会话列表旧 run 状态不覆盖当前新 run，匹配 run 可恢复出图完成状态', async () => {
+	const session = store.getSession(813); session.requestId = 'latest'; session.status = 'GENERATING'
+	let response = { records: [{ conversationId: 813, runId: 'old', runStatus: 'COMPLETED' }] }
+	const scope = vm.createContext({ conversationStore: store, streams: new Map(), disposed: false, sessionEpoch: 0,
+		conversationListVersion: 0, historyLoading: ref(false), conversationRecords: ref([]), sameId: ctx.sameId,
+		listConversations: async () => response,
+	})
+	vm.runInContext(fn('loadConversations'), scope)
+	await scope.loadConversations(); assert.equal(session.status, 'GENERATING')
+	response = { records: [{ conversationId: 813, runId: 'latest', runStatus: 'COMPLETED' }] }
+	await scope.loadConversations(); assert.equal(session.status, 'COMPLETED')
+})
+await check('新建请求途中切换账号或会话时，迟到响应不抢当前会话也不发送旧输入', async () => {
+	for (const accountChanged of [false, true]) {
+		store.reset(); store.setModels(11, 21)
+		let resolveCreated, sent = false
+		const scope = vm.createContext({ conversationStore: store, disposed: false, sessionEpoch: 0, preparingConversation: ref(false),
+			interactionLocked: ref(false), isReferenceUploadPending: () => false, hasGeneratingImage: ref(false), inputText: ref('old prompt'),
+			pendingImages: ref([]), activeSkill: ref(''), selectedClarificationOptionId: ref(''),
+			requireLogin: () => true, uni, createConversation: () => new Promise((resolve) => { resolveCreated = resolve }),
+			createRequestId: () => { sent = true; throw Error('must not send detached input') },
+		})
+		vm.runInContext(fn('handleSend'), scope)
+		const pending = scope.handleSend()
+		store.setConversationId(815)
+		if (accountChanged) { scope.sessionEpoch = 1; scope.preparingConversation.value = false }
+		resolveCreated({ conversationId: accountChanged ? 817 : 816 }); await pending
+		assert.equal(store.conversationId, 815); assert.equal(sent, false); assert.equal(scope.preparingConversation.value, false)
+		if (accountChanged) assert.equal(store.sessions['817'], undefined)
+		else { assert.equal(store.getSession(816).modelId, 11); assert.equal(store.getSession(816).draft.text, 'old prompt') }
+	}
+})
+await check('迟到创建保留本轮文本、参考图顺序与引用、skill 和已选选项', async () => {
+	store.reset()
+	let resolveCreated
+	const originalImages = [{ type: 'upload', url: '/reference-one.png' }, { type: 'generated', taskId: 818, seq: 2, url: '/reference-two.png' }]
+	const scope = vm.createContext({ conversationStore: store, disposed: false, sessionEpoch: 0, preparingConversation: ref(false),
+		interactionLocked: ref(false), isReferenceUploadPending: () => false, hasGeneratingImage: ref(false), inputText: ref('original prompt'),
+		pendingImages: ref(originalImages.slice()), activeSkill: ref('portrait'), selectedClarificationOptionId: ref('keep-original'),
+		requireLogin: () => true, uni, createConversation: () => new Promise((resolve) => { resolveCreated = resolve }),
+		createRequestId: () => { throw Error('must not send detached input') },
+	})
+	vm.runInContext(fn('handleSend'), scope)
+	const pending = scope.handleSend()
+	store.setConversationId(819)
+	scope.inputText.value = 'new session prompt'; scope.pendingImages.value = [{ type: 'upload', url: '/new-session.png' }]
+	scope.activeSkill.value = 'different skill'; scope.selectedClarificationOptionId.value = 'different-option'
+	resolveCreated({ conversationId: 820 }); await pending
+	const draft = store.getSession(820).draft
+	assert.equal(store.conversationId, 819); assert.equal(draft.text, 'original prompt')
+	assert.equal(JSON.stringify(draft.images), JSON.stringify(originalImages))
+	assert.equal(draft.skill, 'portrait'); assert.equal(draft.option, 'keep-original')
+	assert.equal(scope.inputText.value, 'new session prompt'); assert.equal(scope.pendingImages.value[0].url, '/new-session.png')
+})
 await check('Vue 脚本与模板可编译', () => {
 	for (const file of ['pages/index/ChatContent.vue', 'pages/index/components/HistoryOverlay.vue', 'pages/create/CreateContent.vue', 'components/common/ModelSelector.vue']) {
 		const { descriptor, errors } = parse(read(file), { filename: file }); assert.equal(errors.length, 0)

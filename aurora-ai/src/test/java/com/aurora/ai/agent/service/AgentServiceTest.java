@@ -911,8 +911,9 @@ class AgentServiceTest {
                 anyString(), any(), any(), any());
     }
 
-    @Test
-    void shouldStopLaterModelRoundsButKeepSubmittedImageTask() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void shouldFinishOneConversationIndependentlyAndKeepItsSubmittedImagesInHistory(boolean failUpstream) throws Exception {
         SysAiModelMapper modelMapper = mock(SysAiModelMapper.class);
         IConversationService conversationService = mock(IConversationService.class);
         IMessageService messageService = mock(IMessageService.class);
@@ -945,12 +946,30 @@ class AgentServiceTest {
         when(messageService.saveUserMessage(eq(11L), eq(7L), anyString(), isNull(), any()))
                 .thenReturn(userMessage);
         CountDownLatch stoppedSaved = new CountDownLatch(1);
-        when(messageService.saveMessage(eq(11L), eq(7L), eq("assistant"), eq("对话已停止"), eq("text"),
-                isNull(), isNull(), isNull())).thenAnswer(invocation -> {
+        when(messageService.saveMessage(eq(11L), eq(7L), eq("assistant"), anyString(), eq("structured"),
+                anyString(), isNull(), isNull())).thenAnswer(invocation -> {
+                    stoppedMessage.setContent(invocation.getArgument(3));
+                    stoppedMessage.setMedia(invocation.getArgument(5));
                     stoppedSaved.countDown();
                     return stoppedMessage;
                 });
         when(messageService.recentForContext(11L, 11)).thenReturn(List.of(userMessage));
+        Conversation otherConversation = new Conversation();
+        otherConversation.setId(12L);
+        when(conversationService.getOwned(12L, 7L)).thenReturn(otherConversation);
+        Message otherUserMessage = new Message();
+        otherUserMessage.setId(31L);
+        otherUserMessage.setContent("独立会话B");
+        when(messageService.saveUserMessage(eq(12L), eq(7L), anyString(), isNull(), any()))
+                .thenReturn(otherUserMessage);
+        when(messageService.recentForContext(12L, 11)).thenReturn(List.of(otherUserMessage));
+        Message otherAssistant = new Message();
+        otherAssistant.setId(32L);
+        when(messageService.saveMessage(eq(12L), eq(7L), eq("assistant"), anyString(), eq("text"),
+                isNull(), isNull(), isNull())).thenAnswer(invocation -> {
+                    otherAssistant.setContent(invocation.getArgument(3));
+                    return otherAssistant;
+                });
 
         SysAiModel model = new SysAiModel();
         model.setId(9L);
@@ -967,7 +986,9 @@ class AgentServiceTest {
         when(generationTaskService.submitImageBatch(eq(7L), eq(11L), eq(21L), any(), isNull(), eq("1:1"), any()))
                 .thenReturn("task-1");
         when(beanDeductPort.getBalance(7L)).thenReturn(100L);
-        when(beanDeductPort.deductUpToBalance(7L, 12L, "msg:22", "AI对话")).thenReturn(12L);
+        String finishedBillingId = failUpstream ? "msg:21" : "msg:22";
+        when(beanDeductPort.deductUpToBalance(7L, 12L, finishedBillingId, "AI对话")).thenReturn(12L);
+        when(beanDeductPort.deductUpToBalance(7L, 2L, "msg:32", "AI对话")).thenReturn(2L);
 
         String arguments = "{\"expected_count\":1,\"request_update\":\"REPLACE\","
                 + "\"effective_request\":\"生成1张图\",\"jobs\":[{\"seq\":1,\"prompt\":\"海报\","
@@ -978,11 +999,20 @@ class AgentServiceTest {
                 objectMapper.createArrayNode(), 10L, 2L, 0L);
         CountDownLatch secondRoundStarted = new CountDownLatch(1);
         CountDownLatch keepBlocking = new CountDownLatch(1);
+        CountDownLatch otherRoundStarted = new CountDownLatch(1);
+        CountDownLatch otherCanFinish = new CountDownLatch(1);
         when(responsesApiClient.streamRound(eq(model), eq("key"), any(), any(), any(), any()))
                 .thenReturn(firstRound)
                 .thenAnswer(invocation -> {
+                    if (invocation.getArgument(2).toString().contains("独立会话B")) {
+                        otherRoundStarted.countDown();
+                        otherCanFinish.await(5, TimeUnit.SECONDS);
+                        return new ResponsesApiClient.Round(
+                                "会话 B 的回复完成", List.of(), objectMapper.createArrayNode(), 1L, 1L, 0L);
+                    }
                     secondRoundStarted.countDown();
                     keepBlocking.await(5, TimeUnit.SECONDS);
+                    if (failUpstream) throw new IllegalStateException("上游内部错误，不应展示给用户");
                     return new ResponsesApiClient.Round(
                             "不应返回", List.of(), objectMapper.createArrayNode(), 1L, 1L, 0L);
                 });
@@ -995,18 +1025,40 @@ class AgentServiceTest {
         assertTrue(secondRoundStarted.await(3, TimeUnit.SECONDS));
         assertTrue(events.stream().anyMatch(event ->
                 event.contains("\"type\":\"tool\"") && event.contains("\"taskId\":\"task-1\"")));
+        AgentChatRequest otherRequest = new AgentChatRequest();
+        otherRequest.setConversationId(12L);
+        otherRequest.setMessage("独立会话B");
+        List<String> otherEvents = new CopyOnWriteArrayList<>();
+        CountDownLatch otherCompleted = new CountDownLatch(1);
+        Disposable otherSubscription = service.chatStream(7L, otherRequest)
+                .subscribe(otherEvents::add, ignored -> otherCompleted.countDown(), otherCompleted::countDown);
+        assertTrue(otherRoundStarted.await(3, TimeUnit.SECONDS));
         assertFalse(service.stopChat(8L, 21L));
-        assertTrue(service.stopChat(7L, 21L));
+        if (failUpstream) keepBlocking.countDown();
+        else assertTrue(service.stopChat(7L, 21L));
 
         assertTrue(stoppedSaved.await(3, TimeUnit.SECONDS));
-        assertFalse(service.stopChat(7L, 21L));
+        if (!failUpstream) assertFalse(service.stopChat(7L, 21L));
+        assertEquals(1L, otherCompleted.getCount());
+        assertTrue(otherEvents.stream().noneMatch(event -> event.contains("\"type\":\"done\"")));
+        assertEquals(failUpstream ? "对话出错了,请稍后重试" : "对话已停止",
+                objectMapper.readTree(stoppedMessage.getContent()).path("body").asText());
+        assertEquals("task-1", objectMapper.readTree(stoppedMessage.getMedia()).get(0).path("taskId").asText());
+        otherCanFinish.countDown();
+        assertTrue(otherCompleted.await(3, TimeUnit.SECONDS));
+        assertEquals("会话 B 的回复完成", otherAssistant.getContent());
+        assertTrue(otherEvents.stream().anyMatch(event -> event.contains("\"type\":\"done\"")));
+        assertFalse(service.stopChat(7L, 31L));
         verify(generationTaskService, times(1)).submitImageBatch(
                 eq(7L), eq(11L), eq(21L), any(), isNull(), eq("1:1"), any());
-        verify(responsesApiClient, times(2)).streamRound(eq(model), eq("key"), any(), any(), any(), any());
-        verify(beanDeductPort, org.mockito.Mockito.timeout(3000).times(1)).deductUpToBalance(7L, 12L, "msg:22", "AI对话");
-        verify(messageService, never()).saveMessage(eq(11L), eq(7L), eq("assistant"), anyString(),
-                eq("structured"), anyString(), any(), any());
+        verify(responsesApiClient, times(3)).streamRound(eq(model), eq("key"), any(), any(), any(), any());
+        verify(beanDeductPort, org.mockito.Mockito.timeout(3000).times(1))
+                .deductUpToBalance(7L, 12L, finishedBillingId, "AI对话");
+        verify(messageService, times(1)).saveMessage(eq(11L), eq(7L), eq("assistant"), anyString(),
+                eq("structured"), anyString(), isNull(), isNull());
+        verify(beanDeductPort, times(1)).deductUpToBalance(7L, 2L, "msg:32", "AI对话");
         subscription.dispose();
+        otherSubscription.dispose();
     }
 
     @ParameterizedTest

@@ -15,12 +15,14 @@ import com.aurora.framework.utils.EncryptUtils;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.dao.DataAccessException;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
@@ -29,6 +31,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /** Incremental, conversation-scoped memory. Summarization never goes through user billing. */
 @Slf4j
@@ -105,8 +108,8 @@ public class ConversationMemoryService {
                 if (memoryMapper.selectById(conversationId) == null) memoryMapper.insert(memory);
                 else memoryMapper.updateById(memory);
             } catch (Exception e) {
-                log.warn("会话摘要更新失败，保留原始消息: conversationId={}, type={}", conversationId,
-                        e.getClass().getSimpleName());
+                log.warn("会话摘要更新失败，保留原始消息: conversationId={}, modelId={}, type={}, reason={}, messageCount={}",
+                        conversationId, model.getId(), e.getClass().getSimpleName(), summaryFailureCode(e), earlier.size());
                 uncompressed.addAll(earlier);
                 break;
             }
@@ -122,7 +125,7 @@ public class ConversationMemoryService {
         uncompressed.clear();
         uncompressed.addAll(remainder);
         uncompressed.addAll(recent);
-        String images = mergeImageIndex(memory.getImageIndexJson(), recent, userId, conversationId);
+        String images = mergeImageIndex(memory.getImageIndexJson(), uncompressed, userId, conversationId);
         String prompt = memoryPrompt(memory.getSummaryJson(), images);
         return new Context(prompt, List.copyOf(uncompressed));
     }
@@ -283,6 +286,26 @@ public class ConversationMemoryService {
 
     private static int textSize(List<Message> messages) {
         return messages.stream().mapToInt(message -> content(message).length()).sum();
+    }
+
+    private static String summaryFailureCode(Exception error) {
+        if (error instanceof DataAccessException) return "MEMORY_STORAGE_ERROR";
+        if (error instanceof JsonProcessingException) return "INVALID_JSON";
+        if (error instanceof java.io.IOException) return "TRANSPORT_IO_ERROR";
+        if (error instanceof InterruptedException) return "INTERRUPTED";
+        String message = error.getMessage() == null ? "" : error.getMessage();
+        if (error instanceof ServiceException) {
+            var http = Pattern.compile("^Responses 请求失败 HTTP ([1-5][0-9]{2}):").matcher(message);
+            if (http.find()) return "MODEL_HTTP_" + http.group(1);
+            if (message.startsWith("模型输出未完成")) return "MODEL_OUTPUT_INCOMPLETE";
+            if (message.startsWith("模型流式响应超时")) return "MODEL_STREAM_TIMEOUT";
+            if (message.startsWith("模型响应中断")) return "MODEL_STREAM_INTERRUPTED";
+            if (message.equals("待整理历史消息超过摘要预算")) return "HISTORY_INPUT_BUDGET";
+            return "MODEL_SERVICE_ERROR";
+        }
+        if (message.equals("摘要输出格式或长度无效")) return "INVALID_SUMMARY";
+        if (message.equals("历史图片索引整理失败")) return "IMAGE_INDEX_ERROR";
+        return "UNEXPECTED_ERROR";
     }
 
     private static String content(Message message) { return message.getContent() == null ? "" : message.getContent(); }

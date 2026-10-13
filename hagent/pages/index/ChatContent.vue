@@ -342,6 +342,7 @@ const recoveringConversation = computed({
 const preparingConversation = ref(false)
 const interactionLocked = computed(
 	() => streaming.value || recoveringConversation.value || preparingConversation.value
+		|| conversationStore.currentSession.loadingHistory === true
 )
 const showStopButton = computed(
 	() => streaming.value || (recoveringConversation.value && conversationStore.activeMessageId != null)
@@ -927,6 +928,7 @@ const plusVisible = ref(false)
 // ====== 历史浮层 ======
 const historyVisible = ref(false)
 const conversationRecords = ref([])
+let conversationListVersion = 0
 const conversations = computed(() => conversationRecords.value.map((item) => ({ ...item,
 	runStatus: conversationStore.sessions[String(item.conversationId)]?.status || item.runStatus,
 })))
@@ -1025,20 +1027,22 @@ function closeHistory() {
 }
 
 async function loadConversations() {
-	const epoch = sessionEpoch
+	const epoch = sessionEpoch, version = ++conversationListVersion
+	const isLatest = () => !disposed && epoch === sessionEpoch && version === conversationListVersion
 	historyLoading.value = true
 	try {
 		const res = await listConversations(1, 30)
-			if (epoch !== sessionEpoch || disposed) return
+		if (!isLatest()) return
 		conversationRecords.value = (res && res.records) || []
-			conversationRecords.value.forEach((item) => {
-				const session = conversationStore.sessions[String(item.conversationId)]
-				if (session && !streams.has(String(item.conversationId))) session.status = item.runStatus || ''
-			})
+		conversationRecords.value.forEach((item) => {
+			const session = conversationStore.sessions[String(item.conversationId)]
+			if (session && !streams.has(String(item.conversationId))
+				&& (!session.requestId || sameId(session.requestId, item.runId))) session.status = item.runStatus || ''
+		})
 	} catch (e) {
-		conversationRecords.value = []
+		if (isLatest()) conversationRecords.value = []
 	} finally {
-		historyLoading.value = false
+		if (isLatest()) historyLoading.value = false
 	}
 }
 
@@ -1299,8 +1303,12 @@ async function loadConversation(conversationId, showError = false, settleForReve
 	const session = conversationStore.getSession(conversationId)
 	const initialRequestId = session.requestId
 	const epoch = sessionEpoch
+	const loadVersion = (session.historyLoadVersion || 0) + 1
+	session.historyLoadVersion = loadVersion
+	session.loadingHistory = !streams.has(String(conversationId))
 	const ownsSnapshot = () => !disposed && epoch === sessionEpoch && switchVersion === historySwitchVersion
 		&& conversationStore.getSession(conversationId) === session
+		&& session.historyLoadVersion === loadVersion
 		&& session.requestId === initialRequestId && !streams.has(String(conversationId))
 	try {
 		if (!streams.has(String(conversationId))) {
@@ -1326,8 +1334,10 @@ async function loadConversation(conversationId, showError = false, settleForReve
 		scrollToBottom(false)
 		return true
 	} catch (error) {
-		if (showError) uni.showToast({ title: '加载会话失败', icon: 'none' })
+		if (showError && !disposed && epoch === sessionEpoch && switchVersion === historySwitchVersion) uni.showToast({ title: '加载会话失败', icon: 'none' })
 		return false
+	} finally {
+		if (session.historyLoadVersion === loadVersion) session.loadingHistory = false
 	}
 }
 
@@ -1708,16 +1718,30 @@ async function handleSend() {
 		conversationStore.clearPendingResumeTask()
 	}
 	if (conversationStore.conversationId == null) {
+		const epoch = sessionEpoch
+		const draftSession = conversationStore.currentSession
+		const submittedDraft = { text, images: pendingImages.value.slice(),
+			skill: activeSkill.value, option: selectedClarificationOptionId.value }
 		preparingConversation.value = true
 		try {
 			const created = await createConversation(text.slice(0, 50))
+			if (disposed || epoch !== sessionEpoch) return
 			if (!created || created.conversationId == null) throw new Error('创建会话失败')
+			if (conversationStore.currentSession !== draftSession) {
+				const createdSession = conversationStore.getSession(created.conversationId)
+				createdSession.modelId = draftSession.modelId
+				createdSession.imageModelId = draftSession.imageModelId
+				createdSession.draft = submittedDraft
+				conversationStore.persist()
+				return
+			}
 			conversationStore.setConversationId(created.conversationId)
 		} catch (e) {
+			if (disposed || epoch !== sessionEpoch) return
 			uni.showToast({ title: (e && e.message) || '创建会话失败', icon: 'none' })
 			return
 		} finally {
-			preparingConversation.value = false
+			if (epoch === sessionEpoch) preparingConversation.value = false
 		}
 	}
 
@@ -2220,6 +2244,11 @@ watch(() => userStore.userInfo?.id || userStore.userInfo?.userId || '', () => {
 	if (!conversationStore.syncOwner()) return
 	sessionEpoch += 1
 	historySwitchVersion += 1
+	conversationListVersion += 1
+	historyLoading.value = false
+	preparingConversation.value = false
+	historySwitchingId.value = null
+	newConversationSwitching.value = false
 	conversationRecords.value = []
 	streams.forEach((stream) => stream?.abort?.())
 	streams.clear()
