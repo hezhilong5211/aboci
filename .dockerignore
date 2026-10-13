@@ -1,0 +1,13 @@
+# 构建镜像时排除的内容(减小上下文、避免无关文件)
+.git
+.idea
+.vscode
+**/target
+**/node_modules
+**/dist
+AuroraVideoStudio
+*.dmg
+backup_*
+Aurora_database_backup_*.sql
+.claude
+**/*.log

@@ -1,0 +1,124 @@
+/**
+ * Aurora Mobile 公共样式
+ * 全局复用的工具类和基础样式
+ */
+
+/* ====== 全局滚动边界 ====== */
+page {
+	height: 100%;
+	overflow: hidden;
+	overscroll-behavior-y: none;
+	animation: am-page-reveal 0.16s ease-out;
+}
+
+scroll-view {
+	overscroll-behavior: contain;
+}
+
+/* ====== 全局轻交互 ====== */
+@keyframes am-page-reveal {
+	from { opacity: 0.82; }
+	to { opacity: 1; }
+}
+
+/* 原生 button 覆盖登录、保存、支付等独立页面的主要操作。 */
+button {
+	transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+button:active {
+	opacity: 0.86;
+	transform: scale(0.99);
+}
+
+/* view 等非原生按钮通过 hover-class 使用，按下即释放，不引入常驻动画。 */
+.am-tap-feedback {
+	opacity: 0.84 !important;
+	transform: scale(0.985) !important;
+}
+
+.am-motion-none .am-tap-feedback,
+.am-performance-light button {
+	transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	page { animation: none; }
+	button { transition: none; }
+	.am-tap-feedback { transform: none !important; }
+}
+
+/* ====== 安全区域 ====== */
+.safe-area-bottom {
+	padding-bottom: constant(safe-area-inset-bottom);
+	padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* ====== 页面容器 ====== */
+.page-container {
+	min-height: 100vh;
+	background-color: $am-bg-page;
+}
+
+/* ====== Flex 布局 ====== */
+.flex-row {
+	display: flex;
+	flex-direction: row;
+}
+
+.flex-col {
+	display: flex;
+	flex-direction: column;
+}
+
+.flex-center {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.flex-between {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+}
+
+.flex-1 {
+	flex: 1;
+}
+
+/* ====== 文字工具 ====== */
+.am-selectable-text {
+	-webkit-user-select: text;
+	user-select: text;
+}
+
+.text-ellipsis {
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.text-ellipsis-2 {
+	display: -webkit-box;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 2;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* ====== 卡片 ====== */
+.card {
+	background-color: $am-bg-card;
+	border-radius: $am-radius-base;
+	padding: $am-spacing-base;
+	margin: 0 $am-page-padding $am-spacing-base;
+	box-shadow: $am-shadow-sm;
+}
+
+/* ====== 分割线 ====== */
+.divider {
+	height: 1rpx;
+	background-color: $am-border-color-light;
+	margin: $am-spacing-sm 0;
+}

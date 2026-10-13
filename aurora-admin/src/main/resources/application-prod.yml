@@ -1,0 +1,55 @@
+# ===== 生产环境 =====
+# 用 SPRING_PROFILES_ACTIVE=prod 启用。所有敏感项走环境变量;
+# 关键密钥(库口令/JWT/加密 key/CORS)无默认值 —— 未注入则启动失败,杜绝弱默认值上线。
+spring:
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DB:Aurora_datebase}?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8
+    username: ${MYSQL_USERNAME}
+    password: ${MYSQL_PASSWORD}
+
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY:sk-placeholder-for-startup} # 实际模型配置在数据库,启动占位可保留
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6380}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DB:0}
+      timeout: 10s
+      lettuce:
+        pool:
+          max-active: ${REDIS_POOL_MAX_ACTIVE:40}
+          max-idle: ${REDIS_POOL_MAX_IDLE:20}
+          min-idle: 0
+          max-wait: -1ms
+        shutdown-timeout: 100ms
+
+# JWT 签名密钥(必填,必须 >= 64 字节;不足则 TokenService 启动校验直接 fail-fast)
+token:
+  secret: ${AURORA_TOKEN_SECRET}
+
+# 移动端 JWT 密钥(必填,启动时校验至少 32 字节)
+mobile:
+  token:
+    secret: ${MOBILE_TOKEN_SECRET}
+
+# 生产环境不暴露 OpenAPI 描述和调试界面。
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
+knife4j:
+  enable: false
+
+# 框架敏感能力配置(必填;encrypt.key/iv 必须与既有加密数据所用一致,否则无法解密 api_key)
+aurora:
+  encrypt:
+    key: ${AURORA_ENCRYPT_KEY}
+    iv: ${AURORA_ENCRYPT_IV}
+  cors:
+    allowed-origins: ${AURORA_CORS_ORIGINS}

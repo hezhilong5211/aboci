@@ -1,0 +1,21 @@
+{
+  "name": "hagent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "main.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "guard:photo-album": "node scripts/assert-photo-album-gateway.mjs",
+    "guard:auth-session": "node scripts/assert-auth-session.mjs",
+    "guard:wechat-login-code": "node scripts/assert-wechat-login-code.mjs",
+    "guard:distribution-identity": "node scripts/assert-distribution-identity.mjs",
+    "guard:reference-image-order": "node scripts/assert-reference-image-order.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "markdown-it": "^14.2.0",
+    "pinia": "^3.0.4"
+  }
+}

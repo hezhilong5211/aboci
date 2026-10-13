@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+  <defs>
+    <linearGradient id="bg" x1="18" y1="12" x2="184" y2="190" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#185BFF"/>
+      <stop offset="1" stop-color="#A13BEE"/>
+    </linearGradient>
+    <linearGradient id="bronze" x1="62" y1="50" x2="139" y2="143" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFD19B"/>
+      <stop offset="0.45" stop-color="#CD7F32"/>
+      <stop offset="1" stop-color="#8B451F"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="7" flood-color="#271761" flood-opacity="0.32"/>
+    </filter>
+  </defs>
+  <rect width="200" height="200" rx="36" fill="url(#bg)"/>
+  <circle cx="27" cy="28" r="7" fill="#66D8FF" fill-opacity="0.8"/>
+  <path d="M160 25l4 10 10 4-10 4-4 10-4-10-10-4 10-4 4-10z" fill="#FFB8FA"/>
+  <path d="M74 127l-9 39 35-17 35 17-9-39z" fill="#6B2FB5" opacity="0.95"/>
+  <circle cx="100" cy="98" r="55" fill="#FFF" fill-opacity="0.16"/>
+  <circle cx="100" cy="98" r="47" fill="url(#bronze)" stroke="#FFE0B8" stroke-width="5" filter="url(#shadow)"/>
+  <circle cx="100" cy="98" r="37" fill="none" stroke="#FFF2DB" stroke-opacity="0.52" stroke-width="2"/>
+  <text x="100" y="106" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="30" font-weight="800" letter-spacing="1" fill="#FFFFFF">VIP</text>
+  <text x="100" y="187" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" letter-spacing="3" fill="#FFFFFF">ABOCI</text>
+</svg>

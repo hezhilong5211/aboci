@@ -1,0 +1,75 @@
+HELP.md
+target/
+*.class
+.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### VS Code ###
+.vscode/
+
+### macOS ###
+.DS_Store
+**/.DS_Store
+
+### 前端依赖 ###
+node_modules/
+
+### 杂项二进制(非框架资产)###
+*.dmg
+
+### 部署密钥与备份(严禁提交)###
+.env
+/backup_*.sql
+
+### 非框架资产:根级临时/备份/原型文件 ###
+/Aurora_database_backup_*.sql
+/backup_20241230/
+/ai-test.html
+/ai-video-studio*.html
+/ai-drama-studio.html
+/package.json
+/package-lock.json
+
+### 运行期日志 ###
+logs/
+**/logs/
+
+### Redis 持久化产物(本地验证副产物)###
+dump.rdb
+*.rdb
+
+### Delivery credentials and local runtime configuration ###
+*.docx
+/aurora-admin/src/main/resources/application-dev.yml
+*.pem
+*.key
+
+### Local verification artifacts ###
+/*.png
+/文档/*.png

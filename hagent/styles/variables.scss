@@ -1,0 +1,80 @@
+/**
+ * Aurora Mobile 设计系统变量
+ * 所有颜色、字号、间距、圆角在此统一定义
+ * 换项目/换皮只需修改此文件
+ *
+ * 兼容历史变量：新增组件优先使用 tokens.scss 中的 token。
+ */
+
+@import '@/styles/tokens.scss';
+
+/* ====== 品牌色 ====== */
+$am-color-primary: #4C6EF5;            /* 主色 */
+$am-color-primary-light: #748FFC;       /* 主色-浅 */
+$am-color-primary-dark: #3B5BDB;        /* 主色-深 */
+$am-color-primary-bg: rgba(76, 110, 245, 0.08); /* 主色-背景 */
+
+/* ====== 功能色 ====== */
+$am-color-success: #40C057;
+$am-color-warning: #FAB005;
+$am-color-error: #FA5252;
+$am-color-info: #339AF0;
+
+/* ====== 中性色 ====== */
+$am-color-text: #1A1A1A;               /* 主文字 */
+$am-color-text-secondary: #666666;     /* 次要文字 */
+$am-color-text-placeholder: #999999;   /* 占位文字 */
+$am-color-text-disabled: #CCCCCC;      /* 禁用文字 */
+$am-color-text-inverse: #FFFFFF;       /* 反色文字 */
+
+/* ====== 背景色 ====== */
+$am-bg-page: #F5F6FA;                  /* 页面背景 */
+$am-bg-card: #FFFFFF;                  /* 卡片背景 */
+$am-bg-grey: #F8F9FA;                  /* 灰色背景 */
+$am-bg-mask: rgba(0, 0, 0, 0.5);      /* 遮罩 */
+
+/* ====== 边框 ====== */
+$am-border-color: #E8E8E8;
+$am-border-color-light: #F0F0F0;
+
+/* ====== 字号 ====== */
+$am-font-size-xs: 20rpx;               /* 辅助说明 */
+$am-font-size-sm: 24rpx;               /* 辅助信息 */
+$am-font-size-base: 28rpx;             /* 正文 */
+$am-font-size-md: 30rpx;               /* 列表标题 */
+$am-font-size-lg: 32rpx;               /* 页面标题 */
+$am-font-size-xl: 36rpx;               /* 大标题 */
+$am-font-size-xxl: 44rpx;              /* 特大标题 */
+
+/* ====== 行高 ====== */
+$am-line-height-tight: 1.3;
+$am-line-height-base: 1.5;
+$am-line-height-loose: 1.8;
+
+/* ====== 间距 ====== */
+$am-spacing-xs: 8rpx;
+$am-spacing-sm: 16rpx;
+$am-spacing-base: 24rpx;
+$am-spacing-md: 32rpx;
+$am-spacing-lg: 40rpx;
+$am-spacing-xl: 48rpx;
+
+/* ====== 页面边距 ====== */
+$am-page-padding: 30rpx;
+
+/* ====== 圆角 ====== */
+$am-radius-sm: 8rpx;
+$am-radius-base: 12rpx;
+$am-radius-md: 16rpx;
+$am-radius-lg: 24rpx;
+$am-radius-round: 999rpx;              /* 全圆角（胶囊按钮） */
+
+/* ====== 阴影 ====== */
+$am-shadow-sm: 0 2rpx 8rpx rgba(0, 0, 0, 0.04);
+$am-shadow-base: 0 4rpx 16rpx rgba(0, 0, 0, 0.06);
+$am-shadow-lg: 0 8rpx 32rpx rgba(0, 0, 0, 0.08);
+
+/* ====== 动画 ====== */
+$am-transition-fast: 0.15s ease;
+$am-transition-base: 0.3s ease;
+$am-transition-slow: 0.5s ease;

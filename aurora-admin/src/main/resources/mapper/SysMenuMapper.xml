@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aurora.common.core.mapper.SysMenuMapper">
+
+    <resultMap id="SysMenuResult" type="com.aurora.common.core.domain.entity.SysMenu">
+        <id property="menuId" column="menu_id"/>
+        <result property="menuName" column="menu_name"/>
+        <result property="parentId" column="parent_id"/>
+        <result property="orderNum" column="order_num"/>
+        <result property="path" column="path"/>
+        <result property="component" column="component"/>
+        <result property="query" column="query"/>
+        <result property="isFrame" column="is_frame"/>
+        <result property="isCache" column="is_cache"/>
+        <result property="menuType" column="menu_type"/>
+        <result property="visible" column="visible"/>
+        <result property="status" column="status"/>
+        <result property="delFlag" column="del_flag"/>
+        <result property="perms" column="perms"/>
+        <result property="icon" column="icon"/>
+        <result property="createBy" column="create_by"/>
+        <result property="createTime" column="create_time"/>
+        <result property="updateBy" column="update_by"/>
+        <result property="updateTime" column="update_time"/>
+        <result property="remark" column="remark"/>
+    </resultMap>
+
+    <select id="selectPermsByUserId" parameterType="Long" resultType="String">
+        SELECT DISTINCT m.perms
+        FROM sys_menu m
+        INNER JOIN sys_role_menu rm ON m.menu_id = rm.menu_id
+        INNER JOIN sys_role r ON rm.role_id = r.role_id
+            AND r.status = '0'
+            AND r.del_flag = '0'
+        INNER JOIN sys_user_role ur ON r.role_id = ur.role_id
+        INNER JOIN sys_user u ON ur.user_id = u.user_id
+            AND u.status = '0'
+            AND u.del_flag = '0'
+        WHERE u.user_id = #{userId}
+          AND m.status = '0'
+          AND m.del_flag = '0'
+          AND m.perms IS NOT NULL
+          AND m.perms != ''
+    </select>
+
+    <!-- 查询所有菜单树（用于超级管理员，只过滤删除和状态，不过滤visible） -->
+    <select id="selectMenuTreeAll" resultMap="SysMenuResult">
+        SELECT *
+        FROM sys_menu
+        WHERE menu_type IN ('M', 'C')
+          AND status = '0'
+          AND del_flag = '0'
+        ORDER BY parent_id, order_num
+    </select>
+
+    <!-- 查询所有菜单（用于普通查询，包含visible过滤） -->
+    <select id="selectAllMenus" resultMap="SysMenuResult">
+        SELECT *
+        FROM sys_menu
+        WHERE menu_type IN ('M', 'C')
+          AND status = '0'
+          AND del_flag = '0'
+          AND visible = '0'
+        ORDER BY parent_id, order_num
+    </select>
+
+    <select id="selectMenusByUserId" parameterType="Long" resultMap="SysMenuResult">
+        SELECT DISTINCT m.*
+        FROM sys_menu m
+        INNER JOIN sys_role_menu rm ON m.menu_id = rm.menu_id
+        INNER JOIN sys_role r ON rm.role_id = r.role_id
+            AND r.status = '0'
+            AND r.del_flag = '0'
+        INNER JOIN sys_user_role ur ON r.role_id = ur.role_id
+        INNER JOIN sys_user u ON ur.user_id = u.user_id
+            AND u.status = '0'
+            AND u.del_flag = '0'
+        WHERE u.user_id = #{userId}
+          AND m.menu_type IN ('M', 'C')
+          AND m.status = '0'
+          AND m.del_flag = '0'
+          AND m.visible = '0'
+        ORDER BY m.parent_id, m.order_num
+    </select>
+
+</mapper>

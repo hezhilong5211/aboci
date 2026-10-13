@@ -1,0 +1,9 @@
+/**
+ * Pinia 初始化
+ */
+
+import { createPinia } from 'pinia'
+
+const pinia = createPinia()
+
+export default pinia

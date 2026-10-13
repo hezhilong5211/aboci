@@ -1,0 +1,287 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aurora.admin.distribution.mapper.DistributionQueryMapper">
+
+    <sql id="partnerMetricsJoin">
+        LEFT JOIN (
+            SELECT partner_id, COUNT(*) AS visit_count
+            FROM distribution_visit
+            GROUP BY partner_id
+        ) v ON v.partner_id = p.partner_id
+        LEFT JOIN (
+            SELECT partner_id, COUNT(*) AS promoted_user_count
+            FROM distribution_relation
+            GROUP BY partner_id
+        ) r ON r.partner_id = p.partner_id
+        LEFT JOIN (
+            SELECT partner_id,
+                   COUNT(DISTINCT CASE WHEN status != 'REVERSED' THEN referred_user_id END) AS paid_user_count,
+                   SUM(CASE WHEN status != 'REVERSED' THEN 1 ELSE 0 END) AS valid_order_count,
+                   SUM(CASE WHEN status != 'REVERSED' THEN order_amount ELSE 0 END) AS valid_order_amount,
+                   SUM(commission_amount - reversed_amount) AS valid_commission_amount
+            FROM distribution_commission
+            GROUP BY partner_id
+        ) c ON c.partner_id = p.partner_id
+        LEFT JOIN distribution_account a ON a.partner_id = p.partner_id
+    </sql>
+
+    <sql id="partnerColumns">
+        p.partner_id, p.partner_no, p.user_id, u.user_no, u.nick_name, u.avatar_url,
+        CASE
+            WHEN u.phone IS NULL OR u.phone = '' THEN ''
+            WHEN CHAR_LENGTH(u.phone) &lt;= 7 THEN '****'
+            ELSE CONCAT(LEFT(u.phone, 3), '****', RIGHT(u.phone, 4))
+        END AS phone_masked,
+        p.status, p.enabled_time, p.disabled_time,
+        COALESCE(v.visit_count, 0) AS visit_count,
+        COALESCE(r.promoted_user_count, 0) AS promoted_user_count,
+        COALESCE(c.paid_user_count, 0) AS paid_user_count,
+        COALESCE(c.valid_order_count, 0) AS valid_order_count,
+        COALESCE(c.valid_order_amount, 0) AS valid_order_amount,
+        COALESCE(c.valid_commission_amount, 0) AS valid_commission_amount,
+        COALESCE(a.available_amount, 0) AS available_amount,
+        COALESCE(a.withdraw_locked_amount, 0) AS locked_amount,
+        COALESCE(a.total_withdrawn, 0) AS withdrawn_amount,
+        COALESCE(a.debt_amount, 0) AS debt_amount
+    </sql>
+
+    <select id="selectOverview" resultType="com.aurora.admin.distribution.vo.DistributionViews$Overview">
+        SELECT
+            (SELECT COUNT(*) FROM distribution_partner WHERE del_flag = '0') AS partner_count,
+            (SELECT COUNT(*) FROM distribution_relation) AS promoted_user_count,
+            (SELECT COUNT(DISTINCT referred_user_id) FROM distribution_commission WHERE status != 'REVERSED') AS paid_user_count,
+            (SELECT COUNT(*) FROM distribution_commission WHERE status != 'REVERSED') AS valid_order_count,
+            (SELECT COALESCE(SUM(order_amount), 0) FROM distribution_commission WHERE status != 'REVERSED') AS valid_order_amount,
+            (SELECT COALESCE(SUM(commission_amount - reversed_amount), 0) FROM distribution_commission) AS valid_commission_amount,
+            (SELECT COALESCE(SUM(available_amount + withdraw_locked_amount), 0) FROM distribution_account) AS unwithdrawn_amount,
+            (SELECT COALESCE(SUM(total_withdrawn), 0) FROM distribution_account) AS withdrawn_amount,
+            (SELECT COALESCE(SUM(debt_amount), 0) FROM distribution_account) AS debt_amount
+    </select>
+
+    <select id="selectRecentWithdrawals" resultType="com.aurora.admin.distribution.vo.DistributionViews$WithdrawalRow">
+        SELECT w.withdrawal_id, w.withdrawal_no, w.partner_id, p.partner_no, u.nick_name AS partner_name,
+               CASE WHEN u.phone IS NULL OR u.phone = '' THEN ''
+                    WHEN CHAR_LENGTH(u.phone) &lt;= 7 THEN '****'
+                    ELSE CONCAT(LEFT(u.phone, 3), '****', RIGHT(u.phone, 4)) END AS phone_masked,
+               w.apply_amount, w.method_type, w.payee_name, w.bank_name, w.bank_account_masked,
+               (w.receipt_qr_file_key IS NOT NULL) AS receipt_available,
+               w.status, w.reject_reason,
+               CASE WHEN w.payment_reference IS NULL OR w.payment_reference = '' THEN ''
+                    WHEN CHAR_LENGTH(w.payment_reference) &lt;= 8 THEN '****'
+                    ELSE CONCAT(LEFT(w.payment_reference, 4), '****', RIGHT(w.payment_reference, 4)) END AS payment_reference_masked,
+               (w.payment_proof_file_key IS NOT NULL) AS payment_proof_available,
+               w.apply_time, w.audit_time, w.paid_time, w.audit_by, w.pay_by
+        FROM distribution_withdrawal w
+        JOIN distribution_partner p ON p.partner_id = w.partner_id AND p.del_flag = '0'
+        JOIN mobile_user u ON u.user_id = p.user_id AND u.del_flag = '0'
+        ORDER BY w.apply_time DESC, w.withdrawal_id DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectPartnerRanking" resultType="com.aurora.admin.distribution.vo.DistributionViews$PartnerRow">
+        SELECT <include refid="partnerColumns"/>
+        FROM distribution_partner p
+        JOIN mobile_user u ON u.user_id = p.user_id AND u.del_flag = '0'
+        <include refid="partnerMetricsJoin"/>
+        WHERE p.del_flag = '0'
+        ORDER BY valid_order_amount DESC, valid_commission_amount DESC, p.partner_id ASC
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectPartnerCandidates" resultType="com.aurora.admin.distribution.vo.DistributionViews$PartnerCandidate">
+        SELECT u.user_id, u.user_no, u.nick_name, u.avatar_url,
+               CASE WHEN u.phone IS NULL OR u.phone = '' THEN ''
+                    WHEN CHAR_LENGTH(u.phone) &lt;= 7 THEN '****'
+                    ELSE CONCAT(LEFT(u.phone, 3), '****', RIGHT(u.phone, 4)) END AS phone_masked,
+               (p.partner_id IS NOT NULL) AS already_partner
+        FROM mobile_user u
+        LEFT JOIN distribution_partner p ON p.user_id = u.user_id AND p.del_flag = '0'
+        WHERE u.del_flag = '0'
+        <if test="keyword != null and keyword != ''">
+            AND (u.phone LIKE CONCAT('%', #{keyword}, '%')
+                OR u.nick_name LIKE CONCAT('%', #{keyword}, '%')
+                OR u.user_no LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        ORDER BY u.create_time DESC, u.user_id DESC
+    </select>
+
+    <select id="selectPartnerPage" resultType="com.aurora.admin.distribution.vo.DistributionViews$PartnerRow">
+        SELECT <include refid="partnerColumns"/>
+        FROM distribution_partner p
+        JOIN mobile_user u ON u.user_id = p.user_id AND u.del_flag = '0'
+        <include refid="partnerMetricsJoin"/>
+        WHERE p.del_flag = '0'
+        <if test="phone != null and phone != ''">AND u.phone LIKE CONCAT('%', #{phone}, '%')</if>
+        <if test="nickName != null and nickName != ''">AND u.nick_name LIKE CONCAT('%', #{nickName}, '%')</if>
+        <if test="userNo != null and userNo != ''">AND u.user_no LIKE CONCAT('%', #{userNo}, '%')</if>
+        <if test="partnerNo != null and partnerNo != ''">AND p.partner_no LIKE CONCAT('%', #{partnerNo}, '%')</if>
+        <if test="status != null and status != ''">AND p.status = #{status}</if>
+        ORDER BY p.create_time DESC, p.partner_id DESC
+    </select>
+
+    <select id="selectPartnerDetail" resultType="com.aurora.admin.distribution.vo.DistributionViews$PartnerDetail">
+        SELECT <include refid="partnerColumns"/>, p.invite_code, p.remark, p.create_time
+        FROM distribution_partner p
+        JOIN mobile_user u ON u.user_id = p.user_id AND u.del_flag = '0'
+        <include refid="partnerMetricsJoin"/>
+        WHERE p.partner_id = #{partnerId} AND p.del_flag = '0'
+    </select>
+
+    <select id="selectPromotionUsers" resultType="com.aurora.admin.distribution.vo.DistributionViews$PromotionUser">
+        SELECT r.referred_user_id AS user_id, u.nick_name, u.avatar_url,
+               CASE WHEN u.phone IS NULL OR u.phone = '' THEN ''
+                    WHEN CHAR_LENGTH(u.phone) &lt;= 7 THEN '****'
+                    ELSE CONCAT(LEFT(u.phone, 3), '****', RIGHT(u.phone, 4)) END AS phone_masked,
+               r.bind_time,
+               COALESCE(c.order_count, 0) AS order_count,
+               COALESCE(c.order_amount, 0) AS order_amount,
+               COALESCE(c.commission_amount, 0) AS commission_amount
+        FROM distribution_relation r
+        JOIN mobile_user u ON u.user_id = r.referred_user_id AND u.del_flag = '0'
+        LEFT JOIN (
+            SELECT referred_user_id,
+                   SUM(CASE WHEN status != 'REVERSED' THEN 1 ELSE 0 END) AS order_count,
+                   SUM(CASE WHEN status != 'REVERSED' THEN order_amount ELSE 0 END) AS order_amount,
+                   SUM(commission_amount - reversed_amount) AS commission_amount
+            FROM distribution_commission
+            WHERE partner_id = #{partnerId}
+            GROUP BY referred_user_id
+        ) c ON c.referred_user_id = r.referred_user_id
+        WHERE r.partner_id = #{partnerId}
+        ORDER BY r.bind_time DESC, r.relation_id DESC
+    </select>
+
+    <select id="selectPromotionOrders" resultType="com.aurora.admin.distribution.vo.DistributionViews$PromotionOrder">
+        SELECT c.commission_id, c.order_no, u.user_no,
+               CASE WHEN u.phone IS NULL OR u.phone = '' THEN ''
+                    WHEN CHAR_LENGTH(u.phone) &lt;= 7 THEN '****'
+                    ELSE CONCAT(LEFT(u.phone, 3), '****', RIGHT(u.phone, 4)) END AS phone_masked,
+               c.product_type, c.product_name, c.order_amount, c.rate_bps, c.commission_amount,
+               c.status, c.pay_time, c.refund_time
+        FROM distribution_commission c
+        JOIN mobile_user u ON u.user_id = c.referred_user_id AND u.del_flag = '0'
+        WHERE c.partner_id = #{partnerId}
+        ORDER BY c.pay_time DESC, c.commission_id DESC
+    </select>
+
+    <sql id="commissionColumns">
+        c.commission_id, c.order_no, c.partner_id, p.partner_no, pu.nick_name AS partner_name,
+        ou.user_no,
+        CASE WHEN ou.phone IS NULL OR ou.phone = '' THEN ''
+             WHEN CHAR_LENGTH(ou.phone) &lt;= 7 THEN '****'
+             ELSE CONCAT(LEFT(ou.phone, 3), '****', RIGHT(ou.phone, 4)) END AS phone_masked,
+        c.product_type, c.product_name, c.order_amount, c.rate_bps, c.commission_amount,
+        c.available_amount, c.locked_amount, c.withdrawn_amount, c.reversed_amount,
+        c.debt_offset_amount, c.status, c.pay_time, c.refund_no, c.refund_time
+    </sql>
+
+    <select id="selectCommissionPage" resultType="com.aurora.admin.distribution.vo.DistributionViews$CommissionRow">
+        SELECT <include refid="commissionColumns"/>
+        FROM distribution_commission c
+        JOIN distribution_partner p ON p.partner_id = c.partner_id AND p.del_flag = '0'
+        JOIN mobile_user pu ON pu.user_id = p.user_id AND pu.del_flag = '0'
+        JOIN mobile_user ou ON ou.user_id = c.referred_user_id AND ou.del_flag = '0'
+        WHERE 1 = 1
+        <if test="partnerId != null">AND c.partner_id = #{partnerId}</if>
+        <if test="partnerKeyword != null and partnerKeyword != ''">
+            AND (p.partner_no LIKE CONCAT('%', #{partnerKeyword}, '%')
+                OR pu.nick_name LIKE CONCAT('%', #{partnerKeyword}, '%'))
+        </if>
+        <if test="phone != null and phone != ''">AND ou.phone LIKE CONCAT('%', #{phone}, '%')</if>
+        <if test="orderNo != null and orderNo != ''">AND c.order_no LIKE CONCAT('%', #{orderNo}, '%')</if>
+        <if test="productType != null and productType != ''">AND c.product_type = #{productType}</if>
+        <if test="status != null and status != ''">AND c.status = #{status}</if>
+        <if test="payStart != null">AND c.pay_time &gt;= #{payStart}</if>
+        <if test="payEnd != null">AND c.pay_time &lt;= #{payEnd}</if>
+        ORDER BY c.pay_time DESC, c.commission_id DESC
+    </select>
+
+    <select id="selectCommissionDetail" resultType="com.aurora.admin.distribution.vo.DistributionViews$CommissionDetail">
+        SELECT <include refid="commissionColumns"/>
+        FROM distribution_commission c
+        JOIN distribution_partner p ON p.partner_id = c.partner_id AND p.del_flag = '0'
+        JOIN mobile_user pu ON pu.user_id = p.user_id AND pu.del_flag = '0'
+        JOIN mobile_user ou ON ou.user_id = c.referred_user_id AND ou.del_flag = '0'
+        WHERE c.commission_id = #{commissionId}
+    </select>
+
+    <select id="selectTransactionsByOrder" resultType="com.aurora.admin.distribution.vo.DistributionViews$TransactionRow">
+        SELECT transaction_id, type, change_amount, available_after, locked_after, debt_after,
+               biz_no, source_order_no, withdrawal_no, remark, create_time
+        FROM distribution_account_transaction
+        WHERE source_order_no = #{orderNo}
+        ORDER BY transaction_id ASC
+    </select>
+
+    <select id="selectTransactionsByWithdrawal" resultType="com.aurora.admin.distribution.vo.DistributionViews$TransactionRow">
+        SELECT transaction_id, type, change_amount, available_after, locked_after, debt_after,
+               biz_no, source_order_no, withdrawal_no, remark, create_time
+        FROM distribution_account_transaction
+        WHERE withdrawal_no = #{withdrawalNo}
+        ORDER BY transaction_id ASC
+    </select>
+
+    <sql id="withdrawalColumns">
+        w.withdrawal_id, w.withdrawal_no, w.partner_id, p.partner_no, u.nick_name AS partner_name,
+        CASE WHEN u.phone IS NULL OR u.phone = '' THEN ''
+             WHEN CHAR_LENGTH(u.phone) &lt;= 7 THEN '****'
+             ELSE CONCAT(LEFT(u.phone, 3), '****', RIGHT(u.phone, 4)) END AS phone_masked,
+        w.apply_amount, w.method_type, w.payee_name, w.bank_name, w.bank_account_masked,
+        (w.receipt_qr_file_key IS NOT NULL) AS receipt_available,
+        w.status, w.reject_reason,
+        CASE WHEN w.payment_reference IS NULL OR w.payment_reference = '' THEN ''
+             WHEN CHAR_LENGTH(w.payment_reference) &lt;= 8 THEN '****'
+             ELSE CONCAT(LEFT(w.payment_reference, 4), '****', RIGHT(w.payment_reference, 4)) END AS payment_reference_masked,
+        (w.payment_proof_file_key IS NOT NULL) AS payment_proof_available,
+        w.apply_time, w.audit_time, w.paid_time, w.audit_by, w.pay_by
+    </sql>
+
+    <select id="selectWithdrawalPage" resultType="com.aurora.admin.distribution.vo.DistributionViews$WithdrawalRow">
+        SELECT <include refid="withdrawalColumns"/>
+        FROM distribution_withdrawal w
+        JOIN distribution_partner p ON p.partner_id = w.partner_id AND p.del_flag = '0'
+        JOIN mobile_user u ON u.user_id = p.user_id AND u.del_flag = '0'
+        WHERE 1 = 1
+        <if test="partnerId != null">AND w.partner_id = #{partnerId}</if>
+        <if test="withdrawalNo != null and withdrawalNo != ''">AND w.withdrawal_no LIKE CONCAT('%', #{withdrawalNo}, '%')</if>
+        <if test="partnerKeyword != null and partnerKeyword != ''">
+            AND (p.partner_no LIKE CONCAT('%', #{partnerKeyword}, '%')
+                OR u.nick_name LIKE CONCAT('%', #{partnerKeyword}, '%'))
+        </if>
+        <if test="phone != null and phone != ''">AND u.phone LIKE CONCAT('%', #{phone}, '%')</if>
+        <if test="methodType != null and methodType != ''">AND w.method_type = #{methodType}</if>
+        <if test="status != null and status != ''">AND w.status = #{status}</if>
+        <if test="applyStart != null">AND w.apply_time &gt;= #{applyStart}</if>
+        <if test="applyEnd != null">AND w.apply_time &lt;= #{applyEnd}</if>
+        ORDER BY w.apply_time DESC, w.withdrawal_id DESC
+    </select>
+
+    <select id="selectWithdrawalDetail" resultType="com.aurora.admin.distribution.vo.DistributionViews$WithdrawalDetail">
+        SELECT <include refid="withdrawalColumns"/>
+        FROM distribution_withdrawal w
+        JOIN distribution_partner p ON p.partner_id = w.partner_id AND p.del_flag = '0'
+        JOIN mobile_user u ON u.user_id = p.user_id AND u.del_flag = '0'
+        WHERE w.withdrawal_id = #{withdrawalId}
+    </select>
+
+    <select id="selectDashboard" resultType="com.aurora.admin.distribution.vo.DistributionViews$Dashboard">
+        SELECT p.partner_no, p.status,
+               COALESCE(a.available_amount, 0) AS available_amount,
+               COALESCE(a.withdraw_locked_amount, 0) AS locked_amount,
+               COALESCE(a.total_withdrawn, 0) AS withdrawn_amount,
+               COALESCE(a.debt_amount, 0) AS debt_amount,
+               COALESCE(v.visit_count, 0) AS visit_count,
+               COALESCE(r.promoted_user_count, 0) AS promoted_user_count,
+               COALESCE(c.paid_user_count, 0) AS paid_user_count,
+               COALESCE(c.valid_order_count, 0) AS valid_order_count,
+               COALESCE(c.valid_order_amount, 0) AS valid_order_amount,
+               COALESCE(c.valid_commission_amount, 0) AS total_commission_amount,
+               cfg.min_withdraw_amount
+        FROM distribution_partner p
+        <include refid="partnerMetricsJoin"/>
+        JOIN distribution_config cfg ON cfg.config_id = 1
+        WHERE p.partner_id = #{partnerId} AND p.del_flag = '0'
+    </select>
+</mapper>

@@ -1,0 +1,76 @@
+# ============================================================
+# 极光框架一键部署编排。变量取自同目录 .env(复制 .env.example 改值)。
+# 首次 up:MySQL 空数据卷 → 自动执行 initdb 全量 SQL 建库(自带迁移版本记录)→ app 启动,Flyway 只跑其后新增的迁移。
+# 迭代 up:数据卷持久(存量数据不动)→ app 重建,Flyway 自动跑没执行过的增量。
+# 若服务器(宝塔)已自带 MySQL/Redis,可删对应 service,并在 .env 指向外部地址。
+# 上传文件、AI 生成图、分销私有文件都在 app 容器的 /root/aurora 下,已挂数据卷 app_files,重建容器不丢。
+# ============================================================
+services:
+  mysql:
+    image: mysql:8.0
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DB}
+      TZ: Asia/Shanghai
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_0900_ai_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # 首次启动(空数据卷)自动导入基线 schema;数据卷已存在则跳过
+      - ./sql/aurora_framework_full_20261012.sql:/docker-entrypoint-initdb.d/01_baseline.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+
+  app:
+    build: .
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      # JVM 默认时区跟随容器;不设则为 UTC,业务时间会比北京时间晚 8 小时
+      TZ: Asia/Shanghai
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DB: ${MYSQL_DB}
+      MYSQL_USERNAME: root
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_DB: 0
+      AURORA_TOKEN_SECRET: ${AURORA_TOKEN_SECRET}
+      MOBILE_TOKEN_SECRET: ${MOBILE_TOKEN_SECRET}
+      AURORA_ENCRYPT_KEY: ${AURORA_ENCRYPT_KEY}
+      AURORA_ENCRYPT_IV: ${AURORA_ENCRYPT_IV}
+      AURORA_CORS_ORIGINS: ${AURORA_CORS_ORIGINS}
+    volumes:
+      # 容器内 user.home=/root:uploadPath(上传文件、AI 生成图,对应 /profile/**)
+      # 与 distribution-private(分销收款码、打款凭证)都在 /root/aurora 下
+      - app_files:/root/aurora
+
+  web:
+    build: ./aurora-adui
+    restart: always
+    depends_on:
+      - app
+    ports:
+      - "${WEB_PORT:-80}:80"
+
+volumes:
+  mysql_data:
+  redis_data:
+  app_files:

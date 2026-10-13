@@ -1,0 +1,60 @@
+/**
+ * Aurora Mobile 统一动效。
+ * 标准模式保留柔滑反馈，轻量/低动效模式减少重绘和合成压力。
+ */
+
+.am-fade-enter-active,
+.am-fade-leave-active {
+	transition: opacity 0.2s ease;
+}
+
+.am-fade-enter-from,
+.am-fade-leave-to {
+	opacity: 0;
+}
+
+.am-pop-enter-active,
+.am-pop-leave-active {
+	transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.am-pop-enter-from,
+.am-pop-leave-to {
+	opacity: 0;
+	transform: scale(0.96);
+}
+
+.am-slide-up-enter-active,
+.am-slide-up-leave-active {
+	transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+.am-slide-up-enter-from,
+.am-slide-up-leave-to {
+	opacity: 0;
+	transform: translateY(32rpx);
+}
+
+.am-motion-light .am-fade-enter-active,
+.am-motion-light .am-fade-leave-active,
+.am-motion-light .am-pop-enter-active,
+.am-motion-light .am-pop-leave-active,
+.am-motion-light .am-slide-up-enter-active,
+.am-motion-light .am-slide-up-leave-active,
+.am-performance-light .am-fade-enter-active,
+.am-performance-light .am-fade-leave-active,
+.am-performance-light .am-pop-enter-active,
+.am-performance-light .am-pop-leave-active,
+.am-performance-light .am-slide-up-enter-active,
+.am-performance-light .am-slide-up-leave-active {
+	transition-duration: 0.12s;
+}
+
+.am-motion-none .am-fade-enter-active,
+.am-motion-none .am-fade-leave-active,
+.am-motion-none .am-pop-enter-active,
+.am-motion-none .am-pop-leave-active,
+.am-motion-none .am-slide-up-enter-active,
+.am-motion-none .am-slide-up-leave-active {
+	transition: none;
+}

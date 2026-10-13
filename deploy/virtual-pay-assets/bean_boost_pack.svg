@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+  <defs>
+    <linearGradient id="bg" x1="14" y1="10" x2="190" y2="191" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#EEF7FF"/>
+      <stop offset="1" stop-color="#EDE3FF"/>
+    </linearGradient>
+    <linearGradient id="bean" x1="61" y1="46" x2="143" y2="150" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF67A"/>
+      <stop offset="0.55" stop-color="#FFD821"/>
+      <stop offset="1" stop-color="#F2A900"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="38" y1="34" x2="164" y2="166" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1684FF"/>
+      <stop offset="1" stop-color="#B23BE8"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#4B45A4" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+  <rect width="200" height="200" rx="36" fill="url(#bg)"/>
+  <circle cx="100" cy="96" r="65" fill="#FFFFFF" stroke="url(#ring)" stroke-width="6" filter="url(#shadow)"/>
+  <path d="M129 47c24 11 30 43 15 70-15 28-46 42-70 29-22-12-27-38-13-63 14-27 44-47 68-36z" fill="url(#bean)"/>
+  <path d="M129 62c-6 37-27 58-55 65" fill="none" stroke="#D18C00" stroke-width="6" stroke-linecap="round" opacity="0.62"/>
+  <circle cx="145" cy="55" r="22" fill="#175EFF" stroke="#FFFFFF" stroke-width="4"/>
+  <path d="M145 44v22M134 55h22" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round"/>
+  <text x="100" y="187" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" letter-spacing="3" fill="#5D38B8">ABOCI</text>
+</svg>

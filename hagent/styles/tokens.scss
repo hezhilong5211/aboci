@@ -1,0 +1,109 @@
+/**
+ * Aurora Mobile Design Tokens
+ * 只定义设计原子，不写页面结构样式。
+ */
+
+/* ====== 色彩 Color ====== */
+$am-token-color-primary: #4f84ea;
+$am-token-color-primary-weak: #eaf2ff;
+$am-token-color-primary-soft: #deeafb;
+$am-token-color-primary-strong: #3a6fd8;
+
+$am-token-color-success: #22c55e;
+$am-token-color-warning: #ffb020;
+$am-token-color-danger: #ff5a5f;
+$am-token-color-info: #339af0;
+
+$am-token-color-text-title: #0f172a;
+$am-token-color-text-body: #1e293b;
+$am-token-color-text-secondary: #64748b;
+$am-token-color-text-tertiary: #94a3b8;
+$am-token-color-text-disabled: #cbd5e1;
+$am-token-color-text-inverse: #ffffff;
+
+$am-token-color-bg-page: #f6f7fb;
+$am-token-color-bg-surface: #ffffff;
+$am-token-color-bg-soft: #eef5ff;
+$am-token-color-bg-muted: #f1f5fb;
+$am-token-color-bg-mask: rgba(15, 23, 42, 0.38);
+
+$am-token-color-border: #e3e8f0;
+$am-token-color-border-light: #edf2fb;
+
+/* ====== 字体 Typography ====== */
+$am-token-font-size-mini: 18rpx;
+$am-token-font-size-xs: 20rpx;
+$am-token-font-size-sm: 22rpx;
+$am-token-font-size-base: 26rpx;
+$am-token-font-size-md: 28rpx;
+$am-token-font-size-lg: 32rpx;
+$am-token-font-size-xl: 36rpx;
+$am-token-font-size-xxl: 44rpx;
+
+$am-token-line-height-tight: 1.25;
+$am-token-line-height-base: 1.5;
+$am-token-line-height-loose: 1.75;
+
+$am-token-font-weight-regular: 400;
+$am-token-font-weight-medium: 500;
+$am-token-font-weight-semibold: 600;
+$am-token-font-weight-bold: 700;
+$am-token-font-weight-heavy: 800;
+
+/* ====== 间距 Spacing ====== */
+$am-token-space-2: 4rpx;
+$am-token-space-4: 8rpx;
+$am-token-space-6: 12rpx;
+$am-token-space-8: 16rpx;
+$am-token-space-10: 20rpx;
+$am-token-space-12: 24rpx;
+$am-token-space-14: 28rpx;
+$am-token-space-16: 32rpx;
+$am-token-space-20: 40rpx;
+$am-token-space-24: 48rpx;
+$am-token-page-padding: 28rpx;
+
+/* ====== 圆角 Radius ====== */
+$am-token-radius-xs: 6rpx;
+$am-token-radius-sm: 10rpx;
+$am-token-radius-base: 12rpx;
+$am-token-radius-md: 16rpx;
+$am-token-radius-lg: 20rpx;
+$am-token-radius-xl: 28rpx;
+$am-token-radius-xxl: 34rpx;
+$am-token-radius-pill: 999rpx;
+$am-token-radius-circle: 50%;
+
+/* ====== 阴影 Shadow ====== */
+$am-token-shadow-none: none;
+$am-token-shadow-sm: 0 4rpx 12rpx rgba(80, 115, 170, 0.04);
+$am-token-shadow-base: 0 8rpx 24rpx rgba(80, 115, 170, 0.06);
+$am-token-shadow-lg: 0 14rpx 34rpx rgba(90, 134, 210, 0.08);
+
+/* ====== 尺寸 Size ====== */
+$am-token-height-control-sm: 56rpx;
+$am-token-height-control: 72rpx;
+$am-token-height-control-lg: 88rpx;
+$am-token-height-navbar: 44px;
+$am-token-height-tabbar: 100rpx;
+
+/* ====== 动效 Motion ====== */
+$am-token-motion-fast: 0.15s ease;
+$am-token-motion-base: 0.24s ease;
+$am-token-motion-none: 0s;
+
+/* ====== 啊播吡专属 Abopi ======
+ * 渐变、微信绿、深色看图底、品牌阴影等设计稿特有变量
+ */
+/* 主色渐变（按钮 / 强调） */
+$am-token-gradient-primary: linear-gradient(135deg, #4f84ea, #8fb4fb);
+/* 科技感描边渐变（卡片透明描边，padding-box + border-box 双层实现） */
+$am-token-gradient-border: linear-gradient(135deg, #7fb0f7, #a0c4fb);
+/* 微信支付绿 */
+$am-token-color-wx-green: #06c15a;
+/* 大图查看页深色底 */
+$am-token-color-bg-dark: #0b1220;
+/* 主按钮品牌阴影（README px 阴影 ×2 换 rpx） */
+$am-token-shadow-primary: 0 12rpx 32rpx rgba(96, 140, 224, 0.3);
+/* 弹窗阴影（README px 阴影 ×2 换 rpx） */
+$am-token-shadow-modal: 0 60rpx 120rpx rgba(20, 24, 40, 0.28);

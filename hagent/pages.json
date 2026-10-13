@@ -1,0 +1,220 @@
+{
+	"easycom": {
+		"autoscan": false,
+		"custom": {
+			"^Am(Button|Card|Fab|IconBox|Progress|Tag)$": "@/components/am-ui/base/Am$1.vue",
+			"^Am(ActionBar|AddressCard|AuthorBar|Avatar|Badge|Carousel|CategoryListItem|CategoryShortcut|CategorySidebar|ChatBubble|CommentItem|CommunityStats|Countdown|CouponCard|DoctorCard|Dropdown|ImageGrid|ListItem|MediaCard|MedicineCard|MessageEntryGrid|MessageListItem|NotificationItem|OrderStatus|PostCard|PostContent|PostDetailHeader|PriceDetail|ProductCard|ProfileSheet|Section|Segmented|StatsCard|Tabs|Timeline|TipCard|TopicCard|UserFollowCard|VideoCard)$": "@/components/am-ui/display/Am$1.vue",
+			"^Am(ActionSheet|BottomSheet|Empty|ErrorState|Loading|Modal|ReportSheet|ResultPage|Skeleton|Toast)$": "@/components/am-ui/feedback/Am$1.vue",
+			"^Am(Checkbox|CommentComposer|ComposerOption|ComposerToolbar|DatePicker|FilterPanel|Input|MediaUploader|MentionInput|Picker|PostComposer|Radio|RadioGroup|SearchBar|Slider|Stepper|Switch|TopicSelector|Upload)$": "@/components/am-ui/form/Am$1.vue",
+			"^Am(HomeHeader|QuickEntry|TemplateCard)$": "@/components/am-ui/home/Am$1.vue",
+			"^Am(Grid|NavBar|Page|SafeArea|SearchNavBar|StatusBar|StickyBar|Waterfall)$": "@/components/am-ui/layout/Am$1.vue",
+			"^mp-html$": "@/uni_modules/mp-html/components/mp-html/mp-html.vue"
+		}
+	},
+	"pages": [
+		{
+			"path": "pages/index/index",
+			"style": {
+				"navigationBarTitleText": "",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/create/index",
+			"style": {
+				"navigationBarTitleText": "生成",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/cases/index",
+			"style": {
+				"navigationBarTitleText": "案例",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/login/index",
+			"style": {
+				"navigationBarTitleText": "登录",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/user/index",
+			"style": {
+				"navigationBarTitleText": "个人中心",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/user/settings",
+			"style": {
+				"navigationBarTitleText": "个人设置",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/user/password",
+			"style": {
+				"navigationBarTitleText": "密码管理",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/user/works/index",
+			"style": {
+				"navigationBarTitleText": "我的作品",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/user/works/detail",
+			"style": {
+				"navigationBarTitleText": "作品详情",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/user/favorites/index",
+			"style": {
+				"navigationBarTitleText": "我的收藏",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/user/transactions/index",
+			"style": {
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/user/purchase/index",
+			"style": {
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/user/prompt/index",
+			"style": {
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/distribution/index",
+			"style": {
+				"navigationBarTitleText": "推广中心",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/distribution/qrcode",
+			"style": {
+				"navigationBarTitleText": "推广二维码",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/distribution/users",
+			"style": {
+				"navigationBarTitleText": "推广用户",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/distribution/commissions",
+			"style": {
+				"navigationBarTitleText": "佣金明细",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/distribution/withdraw/index",
+			"style": {
+				"navigationBarTitleText": "佣金提现",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/distribution/withdraw/detail",
+			"style": {
+				"navigationBarTitleText": "提现详情",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/legal/detail",
+			"style": {
+				"navigationBarTitleText": "协议政策",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/pay/index",
+			"style": {
+				"navigationBarTitleText": "收银台",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/membership/purchase/index",
+			"style": {
+				"navigationBarTitleText": "开通会员",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/bean/recharge/index",
+			"style": {
+				"navigationBarTitleText": "豆子充值",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/webview/index",
+			"style": {
+				"navigationBarTitleText": ""
+			}
+		}
+	],
+	"globalStyle": {
+		"navigationBarTextStyle": "black",
+		"navigationBarTitleText": "Aurora",
+		"navigationBarBackgroundColor": "#FFFFFF",
+		"backgroundColor": "#F5F6FA"
+	},
+	"tabBar": {
+		"custom": true,
+		"color": "#999999",
+		"selectedColor": "#4F84EA",
+		"borderStyle": "black",
+		"backgroundColor": "#FFFFFF",
+		"list": [
+			{
+				"pagePath": "pages/index/index",
+				"text": "首页",
+				"iconPath": "static/tabbar/placeholder.png",
+				"selectedIconPath": "static/tabbar/placeholder.png"
+			},
+			{
+				"pagePath": "pages/create/index",
+				"text": "生成",
+				"iconPath": "static/tabbar/placeholder.png",
+				"selectedIconPath": "static/tabbar/placeholder.png"
+			},
+			{
+				"pagePath": "pages/cases/index",
+				"text": "案例",
+				"iconPath": "static/tabbar/placeholder.png",
+				"selectedIconPath": "static/tabbar/placeholder.png"
+			},
+			{
+				"pagePath": "pages/user/index",
+				"text": "我的",
+				"iconPath": "static/tabbar/placeholder.png",
+				"selectedIconPath": "static/tabbar/placeholder.png"
+			}
+		]
+	},
+	"uniIdRouter": {}
+}

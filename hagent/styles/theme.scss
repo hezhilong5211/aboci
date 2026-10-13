@@ -1,0 +1,41 @@
+/**
+ * Aurora Mobile Theme
+ * 将设计 token 输出为全局主题变量和轻量模式覆盖。
+ */
+
+@import '@/styles/tokens.scss';
+
+page,
+.am-theme-default {
+	--am-color-primary: #{$am-token-color-primary};
+	--am-color-primary-weak: #{$am-token-color-primary-weak};
+	--am-color-success: #{$am-token-color-success};
+	--am-color-warning: #{$am-token-color-warning};
+	--am-color-danger: #{$am-token-color-danger};
+	--am-color-info: #{$am-token-color-info};
+	--am-color-text-title: #{$am-token-color-text-title};
+	--am-color-text-body: #{$am-token-color-text-body};
+	--am-color-text-secondary: #{$am-token-color-text-secondary};
+	--am-color-text-tertiary: #{$am-token-color-text-tertiary};
+	--am-color-text-disabled: #{$am-token-color-text-disabled};
+	--am-color-bg-page: #{$am-token-color-bg-page};
+	--am-color-bg-surface: #{$am-token-color-bg-surface};
+	--am-color-bg-soft: #{$am-token-color-bg-soft};
+	--am-color-bg-muted: #{$am-token-color-bg-muted};
+	--am-color-bg-mask: #{$am-token-color-bg-mask};
+	--am-color-border: #{$am-token-color-border};
+	--am-color-border-light: #{$am-token-color-border-light};
+	--am-radius-card: #{$am-token-radius-xl};
+	--am-radius-control: #{$am-token-radius-base};
+	--am-shadow-card: #{$am-token-shadow-base};
+	--am-page-padding: #{$am-token-page-padding};
+}
+
+.am-performance-light {
+	--am-shadow-card: #{$am-token-shadow-none};
+}
+
+.am-theme-surface {
+	background: var(--am-color-bg-page);
+	color: var(--am-color-text-body);
+}

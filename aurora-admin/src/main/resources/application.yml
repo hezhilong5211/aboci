@@ -1,0 +1,144 @@
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+    title: 极光框架Api文档
+
+server:
+  # 安全:由容器在可信内部代理范围内解析 X-Forwarded-* 还原真实客户端 IP,
+  # 配合 IpUtils 仅用 getRemoteAddr(),防止客户端伪造 XFF 绕过限流/封禁。
+  forward-headers-strategy: framework
+
+spring:
+  # 多环境:默认 dev;生产用环境变量 SPRING_PROFILES_ACTIVE=prod 切换
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+  # 启用虚拟线程 (Java 21+)
+  threads:
+    virtual:
+      enabled: true
+  application:
+    name: Aurora-demo
+  servlet:
+    multipart:
+      enabled: true
+      # 放宽到 10MB:手机照片(agent 上传图/图生图参考图)普遍 >2MB,过小会在进 Controller 前被拒
+      max-file-size: 10MB
+      max-request-size: 20MB
+  profile:
+    # 上传文件路径
+    upload-path: ${user.home}/aurora/uploadPath
+  # Jackson 日期格式配置
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
+  # Flyway 数据库版本化迁移:
+  # · 首次部署:手动导入基线 schema(sql/aurora_framework_full_*.sql)→ 启动后 Flyway 自动 baseline 为 V1(不重跑、不动数据)
+  # · 迭代部署:新增量脚本放 db/migration/V2+__描述.sql,随代码提交,启动自动按版本顺序执行 → 只建新表/改字段,存量数据零风险
+  flyway:
+    enabled: true
+    baseline-on-migrate: true     # 已有数据的库首次接入时建立基线,不重跑基线、不丢数据
+    baseline-version: 1
+    locations: classpath:db/migration
+    encoding: UTF-8
+    placeholder-replacement: false  # 关闭 ${} 占位符替换,避免与 SQL 内容冲突
+    validate-on-migrate: true
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+  api-docs:
+    path: /v3/api-docs
+  group-configs:
+    - group: 'default'
+      paths-to-match: '/**'
+      packages-to-scan: com.aurora
+
+# 分销敏感文件独立于公开 /profile/** 根目录，仅允许通过业务鉴权接口读取。
+distribution:
+  private-storage-path: ${DISTRIBUTION_PRIVATE_STORAGE_PATH:${user.home}/aurora/distribution-private}
+  qrcode-env-version: ${DISTRIBUTION_QRCODE_ENV_VERSION:release}
+
+# Token 配置(签名密钥按环境放在 application-{profile}.yml)
+token:
+  header: Authorization
+  expireTime: 720  # Token 有效期：12小时（单位：分钟）
+
+# 移动端 Token 配置(独立于后台 token,供 MobileTokenService 使用)
+mobile:
+  token:
+    # HS256 签名密钥;生产经 MOBILE_TOKEN_SECRET 注入,dev 默认值在 application-dev.yml
+    secret: ${MOBILE_TOKEN_SECRET:}
+
+# AI 生成图片保留策略：仅清 generation_task 产物；案例库引用由保护适配器永久保留。
+ai:
+  chat:
+    concurrency:
+      max: ${AI_CHAT_CONCURRENCY_MAX:50}
+      wait-warning-seconds: ${AI_CHAT_WAIT_WARNING_SECONDS:300}
+      wait-timeout-seconds: ${AI_CHAT_WAIT_TIMEOUT_SECONDS:3000}
+  image:
+    concurrency:
+      yunwu: ${AI_IMAGE_CONCURRENCY_YUNWU:30}
+      default: ${AI_IMAGE_CONCURRENCY_DEFAULT:30}
+  generated-image:
+    retention-days: ${AI_GENERATED_IMAGE_RETENTION_DAYS:30}
+    cleanup:
+      enabled: ${AI_GENERATED_IMAGE_CLEANUP_ENABLED:true}
+      cron: '${AI_GENERATED_IMAGE_CLEANUP_CRON:0 20 3 * * *}'
+      zone: '${AI_GENERATED_IMAGE_CLEANUP_ZONE:Asia/Shanghai}'
+      max-tasks-per-run: ${AI_GENERATED_IMAGE_CLEANUP_MAX_TASKS:2000}
+  conversation:
+    retention-days: ${AI_CONVERSATION_RETENTION_DAYS:30}
+    cleanup:
+      enabled: ${AI_CONVERSATION_CLEANUP_ENABLED:true}
+      cron: '${AI_CONVERSATION_CLEANUP_CRON:0 40 3 * * *}'
+      zone: '${AI_CONVERSATION_CLEANUP_ZONE:Asia/Shanghai}'
+      max-conversations-per-run: ${AI_CONVERSATION_CLEANUP_MAX_CONVERSATIONS:2000}
+  uploaded-reference:
+    retention-days: ${AI_UPLOADED_REFERENCE_RETENTION_DAYS:30}
+    cleanup:
+      enabled: ${AI_UPLOADED_REFERENCE_CLEANUP_ENABLED:true}
+      cron: '${AI_UPLOADED_REFERENCE_CLEANUP_CRON:0 0 4 * * *}'
+      zone: '${AI_UPLOADED_REFERENCE_CLEANUP_ZONE:Asia/Shanghai}'
+      max-files-per-run: ${AI_UPLOADED_REFERENCE_CLEANUP_MAX_FILES:2000}
+
+# 会员到期结算：短周期扫描 + 业务接口惰性结算，最后一个有效会员段结束时清空统一豆子余额。
+membership:
+  expiry:
+    enabled: ${MEMBERSHIP_EXPIRY_ENABLED:true}
+    fixed-delay-ms: ${MEMBERSHIP_EXPIRY_FIXED_DELAY_MS:30000}
+    initial-delay-ms: ${MEMBERSHIP_EXPIRY_INITIAL_DELAY_MS:15000}
+    batch-size: ${MEMBERSHIP_EXPIRY_BATCH_SIZE:500}
+
+# Actuator 健康检查/监控(health/info 经 SecurityConfig 放行;metrics 需认证;不暴露 env/beans 等敏感端点)
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when_authorized
+
+# MyBatis Plus 配置
+mybatis-plus:
+  mapper-locations: classpath*:mapper/*.xml
+  type-aliases-package: com.aurora.**.domain
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      logic-delete-field: delFlag  # 逻辑删除字段名
+      logic-delete-value: 2        # 逻辑删除值（已删除）
+      logic-not-delete-value: 0     # 逻辑未删除值（未删除）
+
+# 日志配置
+logging:
+  level:
+    root: INFO
+    com.aurora: INFO
+    # 减少启动时的冗余日志
+    com.aurora.framework.mq: WARN
