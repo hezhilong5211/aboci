@@ -104,6 +104,7 @@ class GenerationTaskConsumerReferenceTest {
         task.setResolution("1K");
         task.setAspectRatio("3:4");
         when(tasks.getById(101L)).thenReturn(task);
+        when(tasks.tryStart("reference-task")).thenReturn(true);
         for (int i = 1; i <= 3; i++) files.put("/profile/ref-" + i + ".png", png(i));
         generated.put("first", png(11));
         generated.put("second", png(12));

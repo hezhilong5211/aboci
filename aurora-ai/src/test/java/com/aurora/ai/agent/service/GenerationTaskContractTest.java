@@ -85,6 +85,7 @@ class GenerationTaskContractTest {
             inserted.setId(88L);
             return 1;
         });
+        when(taskMapper.updateById(any(GenerationTask.class))).thenReturn(1);
     }
 
     @Test

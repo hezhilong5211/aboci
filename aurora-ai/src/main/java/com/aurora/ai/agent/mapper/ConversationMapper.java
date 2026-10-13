@@ -15,6 +15,10 @@ import java.time.LocalDateTime;
 @Mapper
 public interface ConversationMapper extends BaseMapper<Conversation> {
 
+    @Select("SELECT * FROM conversation WHERE id = #{id} AND user_id = #{userId} "
+            + "AND del_flag = '0' AND expire_time > NOW() FOR UPDATE")
+    Conversation selectOwnedForUpdate(@Param("id") Long id, @Param("userId") Long userId);
+
     /** 锁定仍满足过期条件的会话，避免清理与续用并发时误删。 */
     @Select("SELECT * FROM conversation "
             + "WHERE id = #{id} AND del_flag = '0' AND expire_time <= #{cutoff} FOR UPDATE")

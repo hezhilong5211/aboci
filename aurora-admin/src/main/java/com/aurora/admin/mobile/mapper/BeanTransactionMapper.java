@@ -48,17 +48,17 @@ public interface BeanTransactionMapper extends BaseMapper<BeanTransaction> {
     BeanTransaction selectMembershipExpiry(@Param("userId") Long userId,
                                            @Param("expiryBizNo") String expiryBizNo);
 
-    /** 查询原始生成任务的扣豆时刻，用于将晚到退豆归属到原会员周期。 */
+    /** 当前读，保证等到账户锁后能看到并发请求刚提交的扣豆流水。 */
     @Select("SELECT * FROM bean_transaction "
             + "WHERE user_id = #{userId} AND type = 'DEDUCT' AND biz_no = #{bizNo} "
-            + "ORDER BY id DESC LIMIT 1")
+            + "ORDER BY id DESC LIMIT 1 FOR UPDATE")
     BeanTransaction selectLatestDeduct(@Param("userId") Long userId,
                                        @Param("bizNo") String bizNo);
 
-    /** 查询同一业务号是否已经退还，用于账户行锁内保证退款幂等。 */
+    /** 当前读，用于账户行锁内保证退款幂等，不受旧事务快照影响。 */
     @Select("SELECT * FROM bean_transaction "
             + "WHERE user_id = #{userId} AND type = 'REFUND' AND biz_no = #{bizNo} "
-            + "ORDER BY id DESC LIMIT 1")
+            + "ORDER BY id DESC LIMIT 1 FOR UPDATE")
     BeanTransaction selectLatestRefund(@Param("userId") Long userId,
                                        @Param("bizNo") String bizNo);
 

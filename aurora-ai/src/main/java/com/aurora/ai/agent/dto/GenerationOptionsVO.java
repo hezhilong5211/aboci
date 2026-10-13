@@ -19,4 +19,18 @@ public class GenerationOptionsVO implements Serializable {
     private String defaultResolution;
 
     private Map<String, Long> beanCosts;
+
+    private Long modelId;
+    private String modelName;
+    private String provider;
+    private List<String> aspectRatios;
+    private boolean supportsReferenceImages;
+    private int maxReferenceImages;
+
+    public GenerationOptionsVO(List<String> supportedResolutions, String defaultResolution,
+                               Map<String, Long> beanCosts) {
+        this.supportedResolutions = supportedResolutions;
+        this.defaultResolution = defaultResolution;
+        this.beanCosts = beanCosts;
+    }
 }

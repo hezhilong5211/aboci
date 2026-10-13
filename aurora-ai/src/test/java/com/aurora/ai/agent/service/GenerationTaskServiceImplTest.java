@@ -62,6 +62,7 @@ class GenerationTaskServiceImplTest {
         service = spy(new GenerationTaskServiceImpl(
                 objectMapper, taskProducer, modelMapper, new BillingCalculator()));
         ReflectionTestUtils.setField(service, "beanDeductPort", beanDeductPort);
+        doReturn(true).when(service).updateById(any(GenerationTask.class));
     }
 
     @Test
@@ -478,20 +479,23 @@ class GenerationTaskServiceImplTest {
     }
 
     @Test
-    void shouldNotCreateOrQueueTaskWhenAtomicDeductFails() {
+    void shouldNotQueueOrRefundWhenAtomicDeductFails() {
         GenerationTask task = independentBatchTask();
         doReturn(task).when(service).getOwned("source-task", 7L);
         when(modelMapper.selectById(9L)).thenReturn(imageModel());
         when(beanDeductPort.getBalance(7L)).thenReturn(1000L);
         doThrow(new ServiceException("豆子余额不足")).when(beanDeductPort)
                 .deduct(eq(7L), eq(300L), anyString(), eq("AI单张重新生成预扣"));
+        GenerationTask staged = new GenerationTask();
+        staged.setId(88L);
+        doReturn(staged).when(service).createTask(anyString(), eq(7L), eq(33L), isNull(), eq(9L),
+                anyString(), eq(1), eq("2K"), eq("3:4"), anyString(), isNull());
+        doNothing().when(service).markStatus(anyString(), eq("FAILED"), isNull(), eq(0), anyString());
 
         assertThatThrownBy(() -> service.replayWorkItem(7L, "source-task", 3, true))
                 .isInstanceOf(ServiceException.class)
                 .hasMessage("豆子余额不足");
-        verify(service, never()).createTask(
-                anyString(), eq(7L), eq(33L), isNull(), eq(9L), anyString(), anyInt(),
-                anyString(), anyString(), anyString(), isNull());
+        verify(beanDeductPort, never()).refund(anyLong(), anyLong(), anyString(), anyString());
         verify(taskProducer, never()).send(anyString(), org.mockito.ArgumentMatchers.<Map<String, Object>>any());
     }
 

@@ -91,6 +91,9 @@ public class SysAiModel implements Serializable {
      */
     private String defaultResolution;
 
+    /** Fixed supplier quality for the model; image pricing is configured for this quality. */
+    private String imageQuality;
+
     /**
      * 文本-每百万token输入豆子单价(缓存未命中)
      */

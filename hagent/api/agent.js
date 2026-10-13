@@ -54,8 +54,8 @@ export function getGeneration(taskId, options = {}) {
 }
 
 /** 查询后台默认图像模型允许的分辨率选项。 */
-export function getGenerationOptions() {
-	return get('/api/mobile/agent/generation/options')
+export function getGenerationOptions(modelId) {
+	return get('/api/mobile/agent/generation/options', modelId == null ? {} : { modelId })
 }
 
 /** 按当前后台水印配置获取本人任务中指定图片的下载地址。 */
@@ -179,4 +179,14 @@ export function listPromptFavorites(pageNum = 1, pageSize = 10) {
 /** 删除本人一条提示词收藏。 */
 export function deletePromptFavorite(id) {
 	return del(`/api/mobile/agent/prompt-favorites/${id}`)
+}
+
+/** Enabled user-facing models, with server-owned capabilities and bean prices. */
+export function getAvailableModels() {
+	return get('/api/mobile/agent/models')
+}
+
+/** Durable run snapshot; reading it never starts or charges a task. */
+export function getConversationRun(id, options = {}) {
+	return get(`/api/mobile/agent/conversations/${id}/run`, {}, options)
 }

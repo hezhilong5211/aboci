@@ -170,6 +170,7 @@ export function createChatStream(
 import request from '@/utils/request';
 
 export interface SysAiModel {
+  imageQuality?: string;
   id?: number;
   modelName: string;
   apiKey: string;

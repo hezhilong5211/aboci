@@ -29,4 +29,9 @@ public class GenerateImageRequest implements Serializable {
 
     /** 图生图参考图 /profile URL 列表(可空,1~9 张;空=文生图) */
     private List<String> refImages;
+
+    private Long modelId;
+
+    /** Stable across retries of the same submission. */
+    private String requestId;
 }

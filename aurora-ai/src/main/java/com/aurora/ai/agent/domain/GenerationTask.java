@@ -61,6 +61,17 @@ public class GenerationTask implements Serializable {
      */
     private Long modelId;
 
+    private String requestId;
+
+    /** Immutable public model parameters and price captured before the debit. */
+    private String modelNameSnapshot;
+    private String providerSnapshot;
+    private String baseUrlSnapshot;
+    private String modelDeploymentSnapshot;
+    private String imageQualitySnapshot;
+    private Long beanPerImageSnapshot;
+    private Long prepaidBeans;
+
     /**
      * 该任务提示词
      */

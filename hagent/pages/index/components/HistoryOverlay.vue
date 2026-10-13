@@ -46,7 +46,7 @@
 								:key="item.conversationId"
 								@tap="pick(item)"
 								>
-									<text class="history-row-title">{{ item.title || '未命名对话' }}</text>
+									<view class="history-row-main"><text class="history-row-title">{{ item.title || '未命名对话' }}</text><text v-if="item.statusLabel" class="history-run-status" :class="{ 'history-run-status--active': item.running }">{{ item.statusLabel }}</text></view>
 									<text class="history-row-time">
 										{{ isSwitching(item) ? '切换中…' : item.timeLabel }}
 									</text>
@@ -131,6 +131,8 @@ const groups = computed(() => {
 			conversationId: c.conversationId,
 			title: c.title,
 			timeLabel: date ? buildTimeLabel(date, dayDiff) : '',
+			statusLabel: { QUEUED: '排队中', RUNNING: '进行中', GENERATING: '出图中', COMPLETED: '已完成', WAITING_CONFIRMATION: '待确认', WAITING_RECHARGE: '待充值', FAILED: '失败', CANCELLED: '已停止', INTERRUPTED: '已中断' }[c.runStatus] || '',
+			running: ['QUEUED', 'RUNNING', 'GENERATING'].includes(c.runStatus),
 		}
 		if (dayDiff <= 0) today.items.push(item)
 		else if (dayDiff <= 7) week.items.push(item)
@@ -172,6 +174,9 @@ function pick(item) {
 </script>
 
 <style lang="scss" scoped>
+.history-row-main { display: flex; flex-direction: column; min-width: 0; gap: 5rpx; }
+.history-run-status { font-size: 20rpx; color: #8995a5; }
+.history-run-status--active { color: #477ede; }
 .history-overlay {
 	position: fixed;
 	top: 0;

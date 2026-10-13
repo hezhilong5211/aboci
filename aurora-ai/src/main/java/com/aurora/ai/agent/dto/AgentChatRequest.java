@@ -27,6 +27,9 @@ public class AgentChatRequest {
      */
     private Long modelId;
 
+    /** 图片工具使用的模型；为空时使用默认图像模型。 */
+    private Long imageModelId;
+
     /**
      * 用户消息文本
      */

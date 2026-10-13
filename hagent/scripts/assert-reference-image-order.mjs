@@ -41,21 +41,21 @@ function uploadHarness() {
 function chatHarness() {
 	const io = uploadHarness()
 	const requests = []
-	const store = { conversationId: 42, messages: [], setActiveMessageId: noop, setStreaming: noop }
+	const store = { conversationId: 42, currentSession: {}, messages: [], setActiveMessageId: noop, setStreaming: noop }
 	store.addMessage = (message) => store.messages.push(message)
 	const bindings = {
-		...io, requests,
+		...io, requests, streams: new Map(),
 		pendingImages: ref([]), referenceUploading: ref(false), referenceUploadVersion: 0,
 		interactionLocked: ref(false), hasGeneratingImage: ref(false), inputText: ref('生成图片'),
 		pendingClarification: ref(null), selectedClarificationOptionId: ref(''), activeSkill: ref(''),
 		orderEditorVisible: ref(false), conversationStore: store,
 		requireLogin: () => true, createRequestId: () => 'request-1',
-		measureUserMessages: noop, hideKeyboardIfFocused: noop, scrollToBottom: noop,
+		ensureModelSelection: noop, measureUserMessages: noop, hideKeyboardIfFocused: noop, scrollToBottom: noop,
 		createStreamHandlers: () => ({}), chatStream: (payload) => requests.push(payload),
 	}
 	bindings.setInputText = (text) => { bindings.inputText.value = text }
 	return install(chat, [
-		'chooseAndUpload', 'isReferenceUploadPending', 'cancelReferenceUpload', 'resetInputState',
+		'chooseAndUpload', 'isReferenceUploadPending', 'cancelReferenceUpload', 'saveInputDraft', 'restoreInputDraft',
 		'addGeneratedReference', 'removeImage', 'applyPendingImageOrder', 'handleSend',
 	], bindings)
 }
@@ -99,7 +99,9 @@ function chatHarness() {
 	const c = chatHarness()
 	c.chooseAndUpload()
 	const oldDone = c.selections[0].success({ tempFilePaths: ['old-A', 'old-B'] })
-	c.resetInputState()
+	c.saveInputDraft()
+	c.conversationStore.currentSession = {}
+	c.restoreInputDraft()
 	c.chooseAndUpload()
 	const newDone = c.selections[1].success({ tempFilePaths: ['new-A'] })
 	c.uploads[0].resolve({ url: '/profile/old-A' })
@@ -198,7 +200,7 @@ function createHarness() {
 	assert.match(uploader, /watch\(\(\) => props\.images, cancelUpload, \{ flush: 'sync' \}\)/)
 	assert.match(uploader, /onBeforeUnmount\(cancelUpload\)/)
 	assert.match(create, /@uploading-change="referenceUploading = \$event"/)
-	assert.match(chat, /onBeforeUnmount\(\(\) => \{\s*cancelReferenceUpload\(\)/)
+	assert.match(chat, /onBeforeUnmount\(\(\) => \{[\s\S]*?cancelReferenceUpload\(\)/)
 }
 
 // 历史依赖作品仍可展示，但编辑不能把中途成品自动带回新输入。

@@ -8,7 +8,9 @@ import com.aurora.ai.agent.service.ImagePromptCompiler;
 import com.aurora.ai.domain.SysAiModel;
 import com.aurora.ai.mapper.SysAiModelMapper;
 import com.aurora.ai.provider.GptsImageClient;
+import com.aurora.ai.provider.LuxaiImageClient;
 import com.aurora.ai.provider.YunwuImageClient;
+import com.aurora.ai.agent.service.MobileModelCatalogService;
 import com.aurora.ai.provider.support.ImageConcurrencyGate;
 import com.aurora.ai.provider.support.RecoverableApiException;
 import com.aurora.common.core.exception.ServiceException;
@@ -102,6 +104,9 @@ public class GenerationTaskConsumer extends TaskConsumer {
     @Autowired(required = false)
     private IBeanDeductPort beanDeductPort;
 
+    @Autowired
+    private LuxaiImageClient luxaiImageClient;
+
     public GenerationTaskConsumer(StringRedisTemplate redisTemplate,
             ObjectMapper objectMapper,
             TaskProducer taskProducer,
@@ -140,19 +145,48 @@ public class GenerationTaskConsumer extends TaskConsumer {
             throw new ServiceException("出图任务不存在: " + generationTaskId);
         }
         String taskId = task.getTaskId();
-        log.info("🎨 开始出图任务: taskId={}, n={}, modelId={}", taskId, task.getN(), task.getModelId());
+        if (task.getStatus() != null && List.of("SUCCEEDED", "FAILED", "CANCELLED").contains(task.getStatus())) {
+            settleRefund(task, sysAiModelMapper.selectById(task.getModelId()),
+                    task.getSuccessCount() == null ? 0 : task.getSuccessCount());
+            return;
+        }
+        if (!generationTaskService.tryStart(taskId)) return;
+        try {
+            processClaimedTask(task);
+        } catch (Exception error) {
+            GenerationTask latest = generationTaskService.getById(generationTaskId);
+            if (latest == null) latest = task;
+            int successful = latest.getSuccessCount() == null ? 0 : latest.getSuccessCount();
+            generationTaskService.markStatus(taskId, successful > 0 ? "SUCCEEDED" : "FAILED", null,
+                    successful, "出图任务执行中断，请稍后重试");
+            settleRefund(latest, sysAiModelMapper.selectById(latest.getModelId()), successful);
+            log.error("出图任务异常已结算: taskId={}, type={}", taskId, error.getClass().getSimpleName());
+        }
+    }
 
-        // 置处理中
-        generationTaskService.markStatus(taskId, "RUNNING", null, null, null);
+    private void processClaimedTask(GenerationTask task) throws Exception {
+        String taskId = task.getTaskId();
+        log.info("🎨 开始出图任务: taskId={}, n={}, modelId={}", taskId, task.getN(), task.getModelId());
 
         // 取出图模型配置(模型缺失/provider 不支持视为任务级失败,走零成功分支)
         SysAiModel model = sysAiModelMapper.selectById(task.getModelId());
         if (model == null) {
             generationTaskService.markStatus(taskId, "FAILED", null, 0, "出图模型不存在");
-            throw new ServiceException("出图模型不存在: modelId=" + task.getModelId());
+            settleRefund(task, null, 0);
+            return;
+        }
+        // Endpoint, deployment and quality belong to the submitted task. Keys remain encrypted in model management.
+        if (task.getProviderSnapshot() != null) {
+            SysAiModel frozen = new SysAiModel();
+            frozen.setProvider(task.getProviderSnapshot());
+            frozen.setBaseUrl(task.getBaseUrlSnapshot());
+            frozen.setModelDeployment(task.getModelDeploymentSnapshot());
+            frozen.setImageQuality(task.getImageQualitySnapshot());
+            frozen.setApiKey(model.getApiKey());
+            model = frozen;
         }
         String provider = model.getProvider();
-        if (!"yunwu".equalsIgnoreCase(provider) && !"gptsapi".equalsIgnoreCase(provider)) {
+        if (!MobileModelCatalogService.supportsImageProvider(provider)) {
             // provider 配置错误:出图未发起,零成功结算 → 全额退还预扣
             generationTaskService.markStatus(taskId, "FAILED", null, 0, "出图模型供应商不支持");
             settleRefund(task, model, 0);
@@ -174,9 +208,9 @@ public class GenerationTaskConsumer extends TaskConsumer {
         int n = callItems.size();
         boolean img2img = callItems.stream().anyMatch(item ->
                 !item.originalReferences().isEmpty());
-        if (img2img && !"yunwu".equalsIgnoreCase(provider)) {
+        if (img2img && !MobileModelCatalogService.supportsReferences(provider)) {
             // 图生图模型非云雾:出图未发起,零成功结算 → 全额退还预扣
-            generationTaskService.markStatus(taskId, "FAILED", null, 0, "图生图仅支持云雾出图模型");
+            generationTaskService.markStatus(taskId, "FAILED", null, 0, "所选模型不支持图生图");
             settleRefund(task, model, 0);
             log.error("图生图模型供应商不支持: taskId={}, provider={}", taskId, provider);
             return;
@@ -191,12 +225,13 @@ public class GenerationTaskConsumer extends TaskConsumer {
         try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
             ExecutorCompletionService<JobResult> completion = new ExecutorCompletionService<>(executor);
             int submitted = 0;
+            SysAiModel executionModel = model;
             for (int index = 0; index < n; index++) {
                 GenerationCallItem item = callItems.get(index);
                 final int outputIndex = index;
                 try {
                     List<byte[]> references = resolveReferences(taskId, index + 1, item);
-                    completion.submit(() -> generateOne(outputIndex, taskId, task, model,
+                    completion.submit(() -> generateOne(outputIndex, taskId, task, executionModel,
                             apiKey, provider, item.prompt(), references));
                     submitted++;
                 } catch (Exception e) {
@@ -301,6 +336,13 @@ public class GenerationTaskConsumer extends TaskConsumer {
             imageConcurrencyGate.acquire(provider);
             acquired = true;
             byte[] image = callWithBackoff(taskId, () -> {
+                if ("luxai".equalsIgnoreCase(provider)) {
+                    return references.isEmpty()
+                            ? luxaiImageClient.textToImage(model.getBaseUrl(), apiKey, model.getModelDeployment(),
+                                prompt, task.getResolution(), task.getAspectRatio(), model.getImageQuality())
+                            : luxaiImageClient.imageToImage(model.getBaseUrl(), apiKey, model.getModelDeployment(),
+                                prompt, task.getResolution(), task.getAspectRatio(), model.getImageQuality(), references);
+                }
                 if (!references.isEmpty()) {
                     return yunwuImageClient.imageToImage(model.getBaseUrl(), apiKey,
                             model.getModelDeployment(), prompt, task.getResolution(),
@@ -351,8 +393,10 @@ public class GenerationTaskConsumer extends TaskConsumer {
         }
         String taskId = task.getTaskId();
         int n = (task.getN() == null) ? 1 : task.getN();
-        long needed = billingCalculator.imageBeans(model, n, task.getResolution());
-        long actualCost = billingCalculator.imageBeans(model, successCount, task.getResolution());
+        long unitPrice = task.getBeanPerImageSnapshot() != null ? task.getBeanPerImageSnapshot()
+                : model == null ? 0 : billingCalculator.imagePrice(model, task.getResolution());
+        long needed = task.getPrepaidBeans() != null ? task.getPrepaidBeans() : Math.multiplyExact(unitPrice, n);
+        long actualCost = Math.min(needed, Math.multiplyExact(unitPrice, Math.max(0, Math.min(n, successCount))));
         long refundAmt = needed - actualCost;
 
         if (refundAmt > 0) {

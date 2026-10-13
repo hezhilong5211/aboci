@@ -7,11 +7,27 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
+const PENDING_GENERATIONS_KEY = 'agent_pending_generations_v1'
+function readPendingSubmissions() {
+	try {
+		const value = uni.getStorageSync(PENDING_GENERATIONS_KEY)
+		return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+	} catch { return {} }
+}
+function stablePayload(value) {
+	if (Array.isArray(value)) return value.map(stablePayload)
+	if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stablePayload(value[key])]))
+	return value
+}
+
 export const useGenerationStore = defineStore('generation', () => {
 	// ====== 状态 ======
 
 	/** 生成模式(text2img / img2img) */
 	const mode = ref('text2img')
+	const modelId = ref(null)
+	// Persist unknown submissions by account so a relaunch can reuse their billing idempotency keys.
+	const pendingSubmissions = ref(readPendingSubmissions())
 	/** 生成参数 */
 	const params = ref({ aspectRatio: '3:4', n: 1, resolution: '' })
 	/** 提示词(案例「用此模板」带入 / 生成页输入) */
@@ -35,6 +51,36 @@ export const useGenerationStore = defineStore('generation', () => {
 	 * 设置生成模式
 	 * @param {string} m
 	 */
+	function persistPendingSubmissions() {
+		// If storage is unavailable, stop before making a potentially billable request.
+		uni.setStorageSync(PENDING_GENERATIONS_KEY, JSON.parse(JSON.stringify(pendingSubmissions.value)))
+	}
+	function requestFor(payload, ownerId = '') {
+		const accountKey = `user:${String(ownerId)}`
+		const fingerprint = JSON.stringify(stablePayload(payload))
+		const saved = pendingSubmissions.value[accountKey]
+		const requests = Array.isArray(saved) ? saved : saved?.requestId ? [saved] : []
+		let pending = requests.find((item) => item.fingerprint === fingerprint)
+		if (!pending) {
+			pending = { fingerprint, requestId: `image-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}` }
+			requests.push(pending)
+		}
+		pendingSubmissions.value[accountKey] = requests
+		persistPendingSubmissions()
+		return pending.requestId
+	}
+	function acknowledgeRequest(requestId) {
+		Object.entries(pendingSubmissions.value).forEach(([accountKey, saved]) => {
+			const requests = Array.isArray(saved) ? saved : saved?.requestId ? [saved] : []
+			const remaining = requests.filter((item) => item.requestId !== requestId)
+			if (remaining.length) pendingSubmissions.value[accountKey] = remaining
+			else delete pendingSubmissions.value[accountKey]
+		})
+		// A stale acknowledged key is safe: the server returns the same task without another debit.
+		try { persistPendingSubmissions() } catch { /* Retry can still read the previous idempotency key. */ }
+	}
+	function setModelId(id) { modelId.value = id }
+
 	function setMode(m) {
 		mode.value = m
 	}
@@ -147,6 +193,10 @@ export const useGenerationStore = defineStore('generation', () => {
 
 	return {
 		mode,
+		modelId,
+		setModelId,
+		requestFor,
+		acknowledgeRequest,
 		params,
 		prompt,
 		refImages,

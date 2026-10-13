@@ -189,6 +189,31 @@ class ResponsesApiClientTest {
     }
 
     @Test
+    void shouldRequestSol61SummaryAndRecoverNonStreamingSummary() throws Exception {
+        AtomicReference<JsonNode> requestBody = new AtomicReference<>();
+        server.createContext("/v1/responses", exchange -> {
+            requestBody.set(objectMapper.readTree(exchange.getRequestBody()));
+            byte[] bytes = ("data:{\"type\":\"response.completed\",\"response\":{\"output\":["
+                    + "{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"已核对参考图\"}]},"
+                    + "{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"可以继续\"}]}]}}\n\n")
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        SysAiModel model = model();
+        model.setModelDeployment("gpt-6.1-sol");
+        List<String> reasoning = new ArrayList<>();
+        ResponsesApiClient.Round round = new ResponsesApiClient(objectMapper).streamRound(
+                model, "secret", objectMapper.createArrayNode(), objectMapper.createArrayNode(),
+                ignored -> {}, reasoning::add);
+        assertEquals("可以继续", round.content());
+        assertEquals(List.of("已核对参考图"), reasoning);
+        assertEquals("auto", requestBody.get().path("reasoning").path("summary").asText());
+        assertFalse(requestBody.get().path("store").asBoolean(true));
+    }
+
+    @Test
     void shouldSurfaceResponsesFailureEvent() {
         server.createContext("/v1/responses", exchange -> {
             byte[] bytes = ("data:{\"type\":\"response.failed\",\"response\":{\"error\":{"

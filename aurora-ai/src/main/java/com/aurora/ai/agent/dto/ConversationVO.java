@@ -27,6 +27,9 @@ public class ConversationVO {
      */
     private Long modelId;
 
+    private String runId;
+    private String runStatus;
+
     /**
      * 最近消息时间
      */
@@ -51,6 +54,8 @@ public class ConversationVO {
         vo.setConversationId(entity.getId());
         vo.setTitle(entity.getTitle());
         vo.setModelId(entity.getModelId());
+        vo.setRunId(entity.getRunId());
+        vo.setRunStatus(entity.getRunStatus());
         vo.setLastMessageTime(entity.getLastMessageTime());
         vo.setCreateTime(entity.getCreateTime());
         return vo;

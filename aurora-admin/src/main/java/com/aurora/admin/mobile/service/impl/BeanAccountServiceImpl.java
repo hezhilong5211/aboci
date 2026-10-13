@@ -110,6 +110,24 @@ public class BeanAccountServiceImpl extends ServiceImpl<BeanAccountMapper, BeanA
 
     @Override
     @Transactional(rollbackFor = Exception.class)
+    public long deductUpToBalance(Long userId, long amount, String bizNo, String remark) {
+        requirePositive(amount);
+        if (bizNo == null || bizNo.isBlank()) throw new ServiceException("结算业务单号不能为空");
+        BeanAccount account = lockAccount(userId);
+        BeanTransaction existing = beanTransactionMapper.selectLatestDeduct(userId, bizNo);
+        if (existing != null) return Math.max(0L, -existing.getChangeValue());
+        long actual = Math.min(amount, safeBalance(account));
+        if (actual > 0 && baseMapper.deductIfEnough(userId, actual) != 1) {
+            throw new ServiceException("对话扣豆结算失败");
+        }
+        long balanceAfter = actual == 0 ? safeBalance(account) : safeBalance(findByUserId(userId));
+        // A zero debit also closes this settlement, so a retry after recharge cannot charge it again.
+        writeTransaction(userId, TYPE_DEDUCT, -actual, balanceAfter, bizNo, remark);
+        return actual;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
     public void refund(Long userId, long amount, String bizNo, String remark) {
         requirePositive(amount);
         ensureAccount(userId);

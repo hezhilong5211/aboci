@@ -22,6 +22,9 @@ public interface IBeanDeductPort {
      */
     void deduct(Long userId, long beans, String bizNo, String remark);
 
+    /** Atomically settle text usage against the available balance and return the recorded debit. */
+    long deductUpToBalance(Long userId, long beans, String bizNo, String remark);
+
     /**
      * 退还:回冲已消耗豆子。
      *

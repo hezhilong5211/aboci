@@ -65,6 +65,9 @@ public interface IBeanAccountService extends IService<BeanAccount> {
      */
     void deduct(Long userId, long amount, String bizNo, String remark);
 
+    /** Lock the account and record one idempotent debit capped at the available balance. */
+    long deductUpToBalance(Long userId, long amount, String bizNo, String remark);
+
     /**
      * 退还:balance += amount、total_consumed -= amount(不为负),记 REFUND 流水。
      *

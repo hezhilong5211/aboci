@@ -100,7 +100,7 @@
           <a-table-column title="默认" align="center" :width="90">
             <template #cell="{ record }">
               <a-switch
-                v-if="record.modelType === 'image'"
+                v-if="record.modelType === 'image' || record.modelType === 'chat'"
                 :model-value="record.isDefault === 1"
                 :disabled="record.isDefault === 1"
                 @change="(val) => handleSetDefault(record, val)"
@@ -206,6 +206,18 @@
               <a-input-password v-model="form.secretKey" placeholder="请输入 SecretKey" allow-clear />
             </a-form-item>
           </a-col>
+          <a-col :span="24" v-if="form.modelType === 'image' && form.provider === 'luxai'">
+            <a-form-item label="生成质量" extra="固定质量用于该模型的全部生成任务；豆价应覆盖此质量的渠道成本。" :label-col-props="{span: 4}" :wrapper-col-props="{span: 20}">
+              <a-select v-model="form.imageQuality">
+                <a-option v-for="quality in ['auto', 'low', 'medium', 'high', 'xhigh', 'max']" :key="quality" :value="quality">{{ quality }}</a-option>
+              </a-select>
+            </a-form-item>
+          </a-col>
+          <a-col :span="24" v-if="form.modelType === 'image'">
+            <a-form-item label="参考图能力" :label-col-props="{span: 4}" :wrapper-col-props="{span: 20}">
+              <span>{{ ['yunwu', 'luxai'].includes(form.provider) ? '支持有序参考图，最多 9 张' : '仅文生图' }}</span>
+            </a-form-item>
+          </a-col>
           <!-- 图像模型专属:支持画质/画幅多选 + 默认分辨率 -->
           <a-col :span="24" v-if="form.modelType === 'image'">
             <a-form-item label="支持画质" :label-col-props="{span: 4}" :wrapper-col-props="{span: 20}">
@@ -238,7 +250,7 @@
             <a-form-item
               label="最大输出Token"
               field="maxTokens"
-              extra="仅限制单次输出；供应商总上下文上限未知。当前仅回灌最近 10 条历史消息。"
+              extra="仅限制单次输出；供应商总上下文上限未知。近期原文与早期摘要、已确认需求共同组成对话记忆。"
             >
               <a-input-number v-model="form.maxTokens" :step="100" :min="1" style="width: 100%" />
             </a-form-item>
@@ -327,8 +339,8 @@ const typeOptions = ref<any[]>([]);
 const ALLOWED_TYPES = ['chat', 'image', 'video'];
 // 厂商按模型类型映射
 const PROVIDER_BY_TYPE: Record<string, string[]> = {
-  chat: ['deepseek', 'openai', 'aliyun', 'yunwu'],
-  image: ['yunwu', 'gptsapi'],
+  chat: ['deepseek', 'openai', 'aliyun', 'yunwu', 'luxai'],
+  image: ['yunwu', 'gptsapi', 'luxai'],
   video: ['kling']
 };
 // 图像模型可选画质/画幅全集
@@ -348,7 +360,8 @@ const filteredTypeOptions = computed(() =>
 const filteredProviderOptions = computed(() => {
   const type = form.value.modelType;
   const allowed = PROVIDER_BY_TYPE[type] || Object.values(PROVIDER_BY_TYPE).flat();
-  return providerOptions.value.filter(dict => allowed.includes(dict.dictValue));
+  const options = providerOptions.value.some(dict => dict.dictValue === 'luxai') ? providerOptions.value : [...providerOptions.value, { dictValue: 'luxai', dictLabel: 'Luxai' }];
+  return options.filter(dict => allowed.includes(dict.dictValue));
 });
 
 // 标签页配置
@@ -377,6 +390,7 @@ const queryParams = reactive({
 const form = ref<SysAiModel>({
   modelName: '',
   apiKey: '',
+  imageQuality: 'auto',
   baseUrl: 'https://api.openai.com',
   modelDeployment: '',
   temperature: 0.7,
@@ -422,6 +436,7 @@ const rowSelection = {
 
 // 厂商 → 默认 Base URL 映射(仅这几家联动预填)
 const providerBaseUrlMap: Record<string, string> = {
+  luxai: 'https://api.openlux.ai',
   yunwu: 'https://api.yunwu.ai',
   gptsapi: 'https://api.gptsapi.net',
   kling: 'https://api.klingai.com'
@@ -544,6 +559,7 @@ function reset() {
     id: undefined,
     modelName: '',
     apiKey: '',
+  imageQuality: 'auto',
     baseUrl: 'https://api.openai.com',
     modelDeployment: '',
     temperature: 0.7,
@@ -580,7 +596,7 @@ function handleUpdate(row: SysAiModel) {
   reset();
   const id = row.id!;
   getSysAiModel(id).then((response: any) => {
-    form.value = response;
+    form.value = { ...response, imageQuality: response.imageQuality || 'auto' };
     // 回显图像模型画质/画幅:逗号分隔字符串 → 数组(空串→空数组)
     resolutionList.value = response.supportedResolutions ? response.supportedResolutions.split(',') : [];
     ratioList.value = response.supportedAspectRatios ? response.supportedAspectRatios.split(',') : [];
@@ -675,14 +691,14 @@ function handleStatusChange(row: SysAiModel) {
   });
 }
 
-// 设为默认图像模型(同 model_type 唯一,开启一个其余自动关闭);仅在开启时触发
+// 同模型类型只保留一个默认，已有任务仍使用创建时选择的模型。
 function handleSetDefault(row: SysAiModel, val: boolean | string | number) {
   if (!val) {
     return; // 关闭动作忽略:默认靠开启另一个来切换
   }
   Modal.confirm({
     title: '设为默认',
-    content: `确认把「${row.modelName}」设为默认图像模型吗？agent 与生成页出图都会用它。`,
+    content: `确认把「${row.modelName}」设为默认${row.modelType === 'chat' ? '对话' : '出图'}模型吗？未指定模型的新任务将使用它。`,
     onOk: () => {
       setDefaultSysAiModel(row.id as number).then(() => {
         Message.success('已设为默认');

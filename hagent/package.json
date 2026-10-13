@@ -9,7 +9,8 @@
     "guard:auth-session": "node scripts/assert-auth-session.mjs",
     "guard:wechat-login-code": "node scripts/assert-wechat-login-code.mjs",
     "guard:distribution-identity": "node scripts/assert-distribution-identity.mjs",
-    "guard:reference-image-order": "node scripts/assert-reference-image-order.mjs"
+    "guard:reference-image-order": "node scripts/assert-reference-image-order.mjs",
+    "guard:multi-session-models": "node scripts/assert-multi-session-models.mjs"
   },
   "keywords": [],
   "author": "",

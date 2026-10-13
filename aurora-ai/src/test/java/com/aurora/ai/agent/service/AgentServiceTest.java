@@ -28,6 +28,8 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import reactor.core.Disposable;
+import reactor.core.scheduler.Schedulers;
+import com.aurora.ai.agent.domain.ChatRun;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.nio.file.Path;
@@ -58,6 +60,96 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class AgentServiceTest {
+
+    @Test
+    void writesAtomicActualDebitWhenAnotherConversationHasConsumedPartOfBalance() throws Exception {
+        IMessageService messages = mock(IMessageService.class);
+        IBeanDeductPort beans = mock(IBeanDeductPort.class);
+        AgentService service = new AgentService(mock(SysAiModelMapper.class), mock(IConversationService.class), messages,
+                mock(IMessageAttachmentService.class), mock(IReferenceScopeService.class), mock(IGenerationTaskService.class),
+                mock(PromptAssembler.class), mock(ProfileStorage.class), mock(EncryptUtils.class), new ObjectMapper(),
+                new BillingCalculator(), mock(ResponsesApiClient.class), new ApiRateLimiter(50, 300, 3000));
+        ReflectionTestUtils.setField(service, "beanDeductPort", beans);
+        Class<?> type = Class.forName(AgentService.class.getName() + "$TokenUsage");
+        var constructor = type.getDeclaredConstructor();
+        constructor.setAccessible(true);
+        Object usage = constructor.newInstance();
+        ReflectionTestUtils.setField(usage, "promptTokens", 2L);
+        ReflectionTestUtils.setField(usage, "completionTokens", 1L);
+        SysAiModel model = new SysAiModel();
+        model.setBeanPerMtokenInput(1_000_000L);
+        model.setBeanPerMtokenOutput(1_000_000L);
+        Message message = new Message();
+        message.setId(22L);
+        when(beans.deductUpToBalance(7L, 3L, "msg:22", "AI对话")).thenReturn(2L);
+        ReflectionTestUtils.invokeMethod(service, "settleText", 7L, model, usage, message, 21L);
+        assertEquals(2, message.getBeanCost());
+        assertEquals(3, message.getTokenUsage());
+        verify(beans, never()).getBalance(anyLong());
+        verify(beans, never()).deduct(anyLong(), anyLong(), anyString(), anyString());
+        verify(messages).updateById(message);
+    }
+
+    @Test
+    void stoppingWorkerBeforeSchedulerStartsItFinishesDurableRunAndReleasesConversation() throws Exception {
+        var scheduler = Schedulers.newSingle("test-agent-not-started");
+        CountDownLatch blockingWorkerStarted = new CountDownLatch(1);
+        CountDownLatch unblockScheduler = new CountDownLatch(1);
+        CountDownLatch drained = new CountDownLatch(1);
+        scheduler.schedule(() -> {
+            blockingWorkerStarted.countDown();
+            try { unblockScheduler.await(5, TimeUnit.SECONDS); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        });
+        try {
+            assertTrue(blockingWorkerStarted.await(2, TimeUnit.SECONDS));
+            SysAiModelMapper models = mock(SysAiModelMapper.class);
+            IConversationService conversations = mock(IConversationService.class);
+            IMessageService messages = mock(IMessageService.class);
+            ChatRunService runs = mock(ChatRunService.class);
+            AgentService service = new AgentService(models, conversations, messages,
+                    mock(IMessageAttachmentService.class), mock(IReferenceScopeService.class),
+                    mock(IGenerationTaskService.class), mock(PromptAssembler.class), mock(ProfileStorage.class),
+                    mock(EncryptUtils.class), new ObjectMapper(), new BillingCalculator(), mock(ResponsesApiClient.class),
+                    new ApiRateLimiter(50, 300, 3000));
+            ReflectionTestUtils.setField(service, "orchestrationScheduler", scheduler);
+            ReflectionTestUtils.setField(service, "chatRunService", runs);
+            Conversation conversation = new Conversation();
+            conversation.setId(11L);
+            when(conversations.getOwned(11L, 7L)).thenReturn(conversation);
+            SysAiModel model = new SysAiModel();
+            model.setId(9L);
+            model.setModelType("chat");
+            model.setIsActive(1);
+            when(models.selectById(9L)).thenReturn(model);
+            ChatRun run = new ChatRun();
+            run.setId(1L);
+            run.setRequestId("never-started");
+            run.setModelId(9L);
+            run.setImageModelId(20L);
+            run.setStatus("QUEUED");
+            when(runs.reserve(eq(7L), eq(11L), eq("never-started"), anyString(), eq(model), eq(20L), isNull()))
+                    .thenReturn(new ChatRunService.Reservation(run, true));
+            when(runs.applyBillingSnapshot(run, model)).thenReturn(model);
+            AgentChatRequest request = new AgentChatRequest();
+            request.setRequestId("never-started");
+            request.setConversationId(11L);
+            request.setModelId(9L);
+            request.setImageModelId(20L);
+            request.setMessage("你好");
+            service.chatStream(7L, request).subscribe();
+            assertTrue(service.stopChat(7L, "never-started"));
+            assertFalse(service.stopChat(7L, "never-started"));
+            verify(runs).finish(run, "CANCELLED");
+            unblockScheduler.countDown();
+            scheduler.schedule(drained::countDown);
+            assertTrue(drained.await(2, TimeUnit.SECONDS));
+            verifyNoInteractions(messages);
+        } finally {
+            unblockScheduler.countDown();
+            scheduler.dispose();
+        }
+    }
 
     @Test
     void shouldResumePersistedLastUserMessageWithoutSavingDuplicate() {
@@ -598,7 +690,7 @@ class AgentServiceTest {
                         && event.contains("去充值")));
         assertFalse(events.stream().anyMatch(event ->
                 event.contains("\"type\":\"error\"") || event.contains("\"status\":\"failed\"")));
-        verify(beanDeductPort, never()).deduct(anyLong(), anyLong(), anyString(), anyString());
+        verify(beanDeductPort, never()).deductUpToBalance(anyLong(), anyLong(), anyString(), anyString());
         verify(messageService).updateById(assistant);
         assertEquals(0, assistant.getBeanCost());
         assertEquals(2, assistant.getTokenUsage());
@@ -694,7 +786,7 @@ class AgentServiceTest {
 
         if (legacyDependent) {
             verifyNoInteractions(generationTaskService, modelMapper, responsesApiClient);
-            verify(beanDeductPort, never()).deduct(anyLong(), anyLong(), anyString(), anyString());
+            verify(beanDeductPort, never()).deductUpToBalance(anyLong(), anyLong(), anyString(), anyString());
             assertTrue(events.stream().anyMatch(event -> event.contains("不支持任务内生成图引用")));
             return;
         }
@@ -710,7 +802,7 @@ class AgentServiceTest {
                         && event.contains("\"n\":" + expectedCount)));
         assertFalse(events.stream().anyMatch(event -> event.contains("\"type\":\"error\"")));
         verifyNoInteractions(modelMapper, promptAssembler, responsesApiClient);
-        verify(beanDeductPort, never()).deduct(anyLong(), anyLong(), anyString(), anyString());
+        verify(beanDeductPort, never()).deductUpToBalance(anyLong(), anyLong(), anyString(), anyString());
     }
 
     @Test
@@ -805,6 +897,7 @@ class AgentServiceTest {
                         "完成", List.of(), objectMapper.createArrayNode(), 2L, 1L, 0L));
         when(beanDeductPort.getBalance(7L)).thenReturn(100L);
         doThrow(new RuntimeException("消息用量回写失败")).when(messageService).updateById(assistantMessage);
+        when(beanDeductPort.deductUpToBalance(7L, 3L, "msg:22", "AI对话")).thenReturn(3L);
 
         AgentChatRequest request = new AgentChatRequest();
         request.setMessage("你好");
@@ -812,8 +905,8 @@ class AgentServiceTest {
                 .collectList().block(Duration.ofSeconds(5));
 
         assertTrue(events != null && !events.isEmpty());
-        verify(beanDeductPort, timeout(3000)).deduct(7L, 3L, "msg:22", "AI对话");
-        verify(beanDeductPort, never()).deduct(eq(7L), anyLong(), eq("msg:21"), anyString());
+        verify(beanDeductPort, timeout(3000)).deductUpToBalance(7L, 3L, "msg:22", "AI对话");
+        verify(beanDeductPort, never()).deductUpToBalance(eq(7L), anyLong(), eq("msg:21"), anyString());
         verify(messageService, never()).saveMessage(eq(11L), eq(7L), eq("assistant"), eq("对话已停止"),
                 anyString(), any(), any(), any());
     }
@@ -874,6 +967,7 @@ class AgentServiceTest {
         when(generationTaskService.submitImageBatch(eq(7L), eq(11L), eq(21L), any(), isNull(), eq("1:1"), any()))
                 .thenReturn("task-1");
         when(beanDeductPort.getBalance(7L)).thenReturn(100L);
+        when(beanDeductPort.deductUpToBalance(7L, 12L, "msg:22", "AI对话")).thenReturn(12L);
 
         String arguments = "{\"expected_count\":1,\"request_update\":\"REPLACE\","
                 + "\"effective_request\":\"生成1张图\",\"jobs\":[{\"seq\":1,\"prompt\":\"海报\","
@@ -909,7 +1003,7 @@ class AgentServiceTest {
         verify(generationTaskService, times(1)).submitImageBatch(
                 eq(7L), eq(11L), eq(21L), any(), isNull(), eq("1:1"), any());
         verify(responsesApiClient, times(2)).streamRound(eq(model), eq("key"), any(), any(), any(), any());
-        verify(beanDeductPort, org.mockito.Mockito.timeout(3000).times(1)).deduct(7L, 12L, "msg:22", "AI对话");
+        verify(beanDeductPort, org.mockito.Mockito.timeout(3000).times(1)).deductUpToBalance(7L, 12L, "msg:22", "AI对话");
         verify(messageService, never()).saveMessage(eq(11L), eq(7L), eq("assistant"), anyString(),
                 eq("structured"), anyString(), any(), any());
         subscription.dispose();
@@ -971,6 +1065,7 @@ class AgentServiceTest {
         when(beanDeductPort.getBalance(7L)).thenReturn(100L);
 
         CountDownLatch roundStarted = new CountDownLatch(1);
+        when(beanDeductPort.deductUpToBalance(7L, 3L, "msg:22", "AI对话")).thenReturn(3L);
         CountDownLatch allowRoundToFinish = new CountDownLatch(1);
         when(responsesApiClient.streamRound(eq(model), eq("key"), any(), any(), any(), any()))
                 .thenAnswer(invocation -> {
@@ -991,9 +1086,9 @@ class AgentServiceTest {
 
         assertTrue(assistantSaved.await(3, TimeUnit.SECONDS));
         if (failUpstream) {
-            verify(beanDeductPort, never()).deduct(anyLong(), anyLong(), anyString(), anyString());
+            verify(beanDeductPort, never()).deductUpToBalance(anyLong(), anyLong(), anyString(), anyString());
         } else {
-            verify(beanDeductPort, timeout(3000)).deduct(7L, 3L, "msg:22", "AI对话");
+            verify(beanDeductPort, timeout(3000)).deductUpToBalance(7L, 3L, "msg:22", "AI对话");
         }
         verify(messageService, never()).saveMessage(eq(11L), eq(7L), eq("assistant"), eq("对话已停止"),
                 anyString(), any(), any(), any());

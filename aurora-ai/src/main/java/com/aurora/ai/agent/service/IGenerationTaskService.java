@@ -79,6 +79,10 @@ public interface IGenerationTaskService extends IService<GenerationTask> {
     String submitImageGeneration(Long userId, Long conversationId, String prompt, int n,
                                  String resolution, String aspectRatio, List<String> refImages);
 
+    String submitImageGeneration(Long userId, Long conversationId, String prompt, int n,
+                                 String resolution, String aspectRatio, List<String> refImages,
+                                 Long modelId, String requestId);
+
     /**
      * 提交一次包含不同提示词的批量生图任务。
      * 每项引用的图片编号在提交前解析为对应 URL，整批共用一个 taskId 和结算单元。
@@ -88,6 +92,11 @@ public interface IGenerationTaskService extends IService<GenerationTask> {
                             List<GenerateImageItem> items,
                             String resolution, String aspectRatio, List<String> allRefImages);
 
+    String submitImageBatch(Long userId, Long conversationId, Long sourceMessageId,
+                            List<GenerateImageItem> items,
+                            String resolution, String aspectRatio, List<String> allRefImages,
+                            Long modelId, String requestId);
+
     /**
      * 查询本人某条用户消息触发的出图任务，供对话断线后恢复真实占位与结果。
      */
@@ -95,6 +104,11 @@ public interface IGenerationTaskService extends IService<GenerationTask> {
 
     /** 查询当前默认图像模型允许的分辨率选项。 */
     GenerationOptionsVO getGenerationOptions();
+
+    GenerationOptionsVO getGenerationOptions(Long modelId);
+
+    /** Atomic claim: duplicate queue deliveries must not invoke the supplier again. */
+    boolean tryStart(String taskId);
 
     /** 查询本人任务中的单张作品详情，包含该张实际使用的提示词和参考图。 */
     WorkItemDetailVO getWorkItemDetail(Long userId, String taskId, int seq);

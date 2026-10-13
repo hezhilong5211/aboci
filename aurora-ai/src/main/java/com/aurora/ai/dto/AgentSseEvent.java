@@ -39,6 +39,11 @@ public class AgentSseEvent implements Serializable {
      */
     private Long messageId;
 
+    /** 持久化执行标识，用于切换会话后恢复。 */
+    private String runId;
+
+    private String requestId;
+
     /**
      * 增量内容:正文增量(text)或思考增量(thinking),按 type 区分
      */

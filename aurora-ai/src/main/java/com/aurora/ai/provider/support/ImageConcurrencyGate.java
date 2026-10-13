@@ -35,6 +35,9 @@ public class ImageConcurrencyGate {
     @Value("${ai.image.concurrency.yunwu:30}")
     private int yunwuLimit;
 
+    @Value("${ai.image.concurrency.luxai:5}")
+    private int luxaiLimit = 5;
+
     /** 其余出图 provider(含 gptsapi 备用)的并发上限默认值。 */
     @Value("${ai.image.concurrency.default:30}")
     private int defaultLimit;
@@ -46,7 +49,7 @@ public class ImageConcurrencyGate {
 
     /** 该 provider 的并发上限 */
     private int limitOf(String key) {
-        return "yunwu".equals(key) ? yunwuLimit : defaultLimit;
+        return "yunwu".equals(key) ? yunwuLimit : "luxai".equals(key) ? luxaiLimit : defaultLimit;
     }
 
     private Semaphore gateOf(String provider) {

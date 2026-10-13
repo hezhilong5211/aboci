@@ -88,6 +88,10 @@ public class GeneratedImageRetentionService {
         List<GenerationTask> tasks = generationTaskService.list(new LambdaQueryWrapper<GenerationTask>()
                 .eq(GenerationTask::getTaskType, "image")
                 .le(GenerationTask::getCreateTime, cutoff)
+                .notExists("SELECT 1 FROM conversation c WHERE c.id = generation_task.conversation_id "
+                        + "AND c.del_flag = '0' AND c.expire_time > NOW()")
+                .notExists("SELECT 1 FROM message_attachment a JOIN conversation c ON c.id = a.conversation_id "
+                        + "WHERE a.source_task_id = generation_task.task_id AND c.del_flag = '0' AND c.expire_time > NOW()")
                 .orderByAsc(GenerationTask::getCreateTime)
                 .last("LIMIT " + maxTasksPerRun));
 

@@ -128,6 +128,28 @@ class BeanAccountServiceTest {
     }
 
     @Test
+    void cappedTextSettlementsConsumeRemainingBalanceAndRetryTheOriginalAmount() {
+        accountMapper.seed(USER_ID, 100L);
+        assertEquals(80L, service.deductUpToBalance(USER_ID, 80L, "text:first", "text"));
+        assertEquals(20L, service.deductUpToBalance(USER_ID, 80L, "text:second", "text"));
+        service.recharge(USER_ID, 100L, "recharge", "recharge");
+        assertEquals(20L, service.deductUpToBalance(USER_ID, 80L, "text:second", "retry"));
+        assertEquals(100L, accountMapper.balanceOf(USER_ID));
+        assertEquals(100L, accountMapper.consumedOf(USER_ID));
+        assertEquals(3, transactionMapper.records.size());
+    }
+
+    @Test
+    void zeroBalanceTextSettlementCannotChargeALaterRecharge() {
+        accountMapper.seed(USER_ID, 0L);
+        assertEquals(0L, service.deductUpToBalance(USER_ID, 5L, "text:empty", "text"));
+        service.recharge(USER_ID, 10L, "recharge", "recharge");
+        assertEquals(0L, service.deductUpToBalance(USER_ID, 5L, "text:empty", "retry"));
+        assertEquals(10L, accountMapper.balanceOf(USER_ID));
+        assertEquals(2, transactionMapper.records.size());
+    }
+
+    @Test
     void 消费优先使用会员赠豆_到期仅失效会员剩余并保留加油包() {
         accountMapper.seed(USER_ID, 0L);
         service.recharge(USER_ID, 1000L, "permanent-addon", "永久加油包");

@@ -68,6 +68,10 @@ public class ResponsesApiClient {
         body.put("model", model.getModelDeployment());
         body.set("input", toRequestInput(input));
         body.put("stream", true);
+        if ("gpt-6.1-sol".equalsIgnoreCase(model.getModelDeployment())) {
+            body.putObject("reasoning").put("summary", "auto");
+            body.put("store", false);
+        }
         if (model.getMaxTokens() != null && model.getMaxTokens() > 0) {
             body.put("max_output_tokens", model.getMaxTokens());
         }
@@ -93,6 +97,7 @@ public class ResponsesApiClient {
         long outputTokens = 0;
         long cachedTokens = 0;
         boolean receivedCompletion = false;
+        boolean receivedReasoningDelta = false;
         long started = System.nanoTime();
         AtomicLong lastEvent = new AtomicLong(started);
         AtomicBoolean timedOut = new AtomicBoolean();
@@ -130,6 +135,7 @@ public class ResponsesApiClient {
                         || "response.reasoning_text.delta".equals(type)) {
                     String delta = event.path("delta").asText("");
                     if (!delta.isEmpty()) {
+                        receivedReasoningDelta = true;
                         onReasoning.accept(delta);
                     }
                 } else if ("response.output_item.done".equals(type) && event.path("item").isObject()) {
@@ -171,6 +177,15 @@ public class ResponsesApiClient {
         if (!receivedCompletion) throw new ServiceException("模型响应中断，未收到完整结束事件，本轮计划未提交");
 
         ArrayNode outputItems = completedOutput.isEmpty() ? fallbackOutput : completedOutput;
+        if (!receivedReasoningDelta) {
+            for (JsonNode item : outputItems) {
+                if (!"reasoning".equals(item.path("type").asText())) continue;
+                for (JsonNode summary : item.path("summary")) {
+                    String text = summary.path("text").asText("");
+                    if (!text.isEmpty()) onReasoning.accept(text);
+                }
+            }
+        }
         if (content.isEmpty()) {
             content.append(extractOutputText(outputItems));
         }

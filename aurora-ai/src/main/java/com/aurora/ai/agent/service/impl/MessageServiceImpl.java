@@ -6,6 +6,7 @@ import com.aurora.ai.agent.dto.MessageAttachmentDraft;
 import com.aurora.ai.agent.mapper.MessageAttachmentMapper;
 import com.aurora.ai.agent.mapper.MessageMapper;
 import com.aurora.ai.agent.service.IMessageService;
+import com.aurora.common.core.exception.ServiceException;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
@@ -74,6 +75,31 @@ public class MessageServiceImpl extends ServiceImpl<MessageMapper, Message> impl
             }
         }
         return message;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void appendUserAttachments(Long userId, Long messageId, String media, List<MessageAttachmentDraft> attachments) {
+        Message message = getById(messageId);
+        if (message == null || !userId.equals(message.getUserId()) || !"user".equals(message.getRole())) {
+            throw new ServiceException("消息不存在或无权访问");
+        }
+        for (MessageAttachmentDraft draft : attachments) {
+            MessageAttachment attachment = new MessageAttachment();
+            attachment.setAttachmentId(draft.attachmentId());
+            attachment.setMessageId(messageId);
+            attachment.setConversationId(message.getConversationId());
+            attachment.setUserId(userId);
+            attachment.setPosition(draft.position());
+            attachment.setSourceType(draft.sourceType());
+            attachment.setProfileUrl(draft.profileUrl());
+            attachment.setSourceTaskId(draft.sourceTaskId());
+            attachment.setSourceSeq(draft.sourceSeq());
+            attachment.setCreateTime(LocalDateTime.now());
+            messageAttachmentMapper.insert(attachment);
+        }
+        message.setMedia(media);
+        updateById(message);
     }
 
     @Override

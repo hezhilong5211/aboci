@@ -3,6 +3,10 @@ package com.aurora.ai.controller;
 import com.aurora.ai.domain.SysAiModel;
 import com.aurora.ai.provider.GeminiVisionClient;
 import com.aurora.ai.provider.ResponsesApiClient;
+import com.aurora.ai.provider.LuxaiImageClient;
+import com.aurora.ai.provider.LuxaiImageSize;
+import com.aurora.ai.agent.domain.GenerationTask;
+import com.aurora.ai.agent.mapper.GenerationTaskMapper;
 import com.aurora.ai.service.AiFactory;
 import com.aurora.ai.service.impl.AiServiceImpl;
 import com.aurora.ai.mapper.SysAiModelMapper;
@@ -17,6 +21,9 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.beans.BeanWrapperImpl;
+import org.springframework.beans.BeanUtils;
 
 import java.time.LocalDateTime;
 import java.util.Arrays;
@@ -36,6 +43,8 @@ public class SysAiModelController {
     private final EncryptUtils encryptUtils;
     private final GeminiVisionClient geminiVisionClient;
     private final ResponsesApiClient responsesApiClient;
+    private final LuxaiImageClient luxaiImageClient;
+    private final GenerationTaskMapper generationTasks;
 
     /**
      * 分页查询模型列表
@@ -97,14 +106,15 @@ public class SysAiModelController {
     /**
      * 新增 AI 模型
      */
-    @Log(title = "模型配置", businessType = BusinessType.INSERT)
+    @Log(title = "模型配置", businessType = BusinessType.INSERT, isSaveRequestData = false)
     @PostMapping
     @PreAuthorize("@ss.hasPermi('ai:model:add')")
     public Result<Void> add(@RequestBody SysAiModel sysAiModel) {
-        String validationError = validateImageResolutionBilling(sysAiModel);
+        String validationError = validateModelConfiguration(sysAiModel);
         if (validationError != null) {
             return Result.error(validationError);
         }
+        if (sysAiModel.getApiKey() == null) sysAiModel.setApiKey("");
         // 加密 API Key 后存储
         if (sysAiModel.getApiKey() != null && !sysAiModel.getApiKey().isEmpty()) {
             sysAiModel.setApiKey(encryptUtils.encrypt(sysAiModel.getApiKey()));
@@ -122,13 +132,25 @@ public class SysAiModelController {
     /**
      * 修改 AI 模型
      */
-    @Log(title = "模型配置", businessType = BusinessType.UPDATE)
+    @Log(title = "模型配置", businessType = BusinessType.UPDATE, isSaveRequestData = false)
     @PutMapping
     @PreAuthorize("@ss.hasPermi('ai:model:edit')")
     public Result<Void> edit(@RequestBody SysAiModel sysAiModel) {
-        String validationError = validateImageResolutionBilling(sysAiModel);
+        SysAiModel effective = sysAiModelMapper.selectById(sysAiModel.getId());
+        if (effective == null) return Result.error("模型不存在");
+        String storedKey = effective.getApiKey();
+        BeanWrapperImpl properties = new BeanWrapperImpl(sysAiModel);
+        String[] omitted = Arrays.stream(properties.getPropertyDescriptors())
+                .filter(property -> properties.getPropertyValue(property.getName()) == null)
+                .map(java.beans.PropertyDescriptor::getName).toArray(String[]::new);
+        BeanUtils.copyProperties(sysAiModel, effective, omitted);
+        if (sysAiModel.getApiKey() != null && sysAiModel.getApiKey().contains("****")) effective.setApiKey(storedKey);
+        String validationError = validateModelConfiguration(effective);
         if (validationError != null) {
             return Result.error(validationError);
+        }
+        if ("gpt-6.1-sol".equalsIgnoreCase(effective.getModelDeployment())) {
+            sysAiModel.setApiProtocol(effective.getApiProtocol());
         }
         // 如果 API Key 是脱敏后的格式（包含 ****），则不更新 API Key
         if (sysAiModel.getApiKey() != null && sysAiModel.getApiKey().contains("****")) {
@@ -171,14 +193,50 @@ public class SysAiModelController {
             return "默认分辨率必须属于已启用选项";
         }
         for (String resolution : supported) {
+            if (!List.of("1K", "2K", "4K").contains(resolution)) return "不支持的分辨率: " + resolution;
             Long price = switch (resolution) {
                 case "1K" -> model.getBeanPerImage1k();
                 case "2K" -> model.getBeanPerImage2k();
                 case "4K" -> model.getBeanPerImage4k();
                 default -> null;
             };
-            if (price == null || price < 0) {
+            if ((price == null && Integer.valueOf(1).equals(model.getIsActive())) || (price != null && price < 0)) {
                 return "请配置 " + resolution + " 每张消耗豆子";
+            }
+        }
+        return null;
+    }
+
+    private String validateModelConfiguration(SysAiModel model) {
+        if (model == null) return "模型配置不能为空";
+        if ("gpt-6.1-sol".equalsIgnoreCase(model.getModelDeployment())) {
+            if (model.getApiProtocol() == null || model.getApiProtocol().isBlank()) model.setApiProtocol("responses");
+            if (!"responses".equalsIgnoreCase(model.getApiProtocol())) return "GPT-6.1 Sol 需使用 Responses 协议";
+        }
+        if (Integer.valueOf(1).equals(model.getIsActive())) {
+            if (model.getApiKey() == null || model.getApiKey().isBlank()) return "启用模型前请配置 API Key";
+            if (model.getBaseUrl() == null || model.getBaseUrl().isBlank()
+                    || model.getModelDeployment() == null || model.getModelDeployment().isBlank()) return "请配置模型地址和模型 ID";
+            if ("chat".equals(model.getModelType()) && (model.getBeanPerMtokenInput() == null
+                    || model.getBeanPerMtokenOutput() == null)) return "启用对话模型前请配置输入和输出收费标准";
+        }
+        for (Long price : Arrays.asList(model.getBeanPerMtokenInput(), model.getBeanPerMtokenInputCached(),
+                model.getBeanPerMtokenOutput(), model.getBeanPerImage(), model.getBeanPerImage1k(),
+                model.getBeanPerImage2k(), model.getBeanPerImage4k())) {
+            if (price != null && price < 0) return "模型收费标准不能为负数";
+        }
+        String error = validateImageResolutionBilling(model);
+        if (error != null) return error;
+        if ("image".equals(model.getModelType()) && "luxai".equalsIgnoreCase(model.getProvider())) {
+            try {
+                model.setImageQuality(LuxaiImageClient.quality(model.getImageQuality()));
+                List<String> ratios = com.aurora.ai.agent.service.MobileModelCatalogService.csv(model.getSupportedAspectRatios());
+                if (ratios.isEmpty()) return "请配置 Luxai 画幅比例";
+                for (String resolution : model.getSupportedResolutions().split(",")) {
+                    for (String ratio : ratios) LuxaiImageSize.of(resolution.trim(), ratio);
+                }
+            } catch (com.aurora.common.core.exception.ServiceException invalid) {
+                return invalid.getMessage();
             }
         }
         return null;
@@ -190,12 +248,16 @@ public class SysAiModelController {
      */
     @Log(title = "模型配置", businessType = BusinessType.UPDATE)
     @PutMapping("/setDefault/{id}")
+    @Transactional(rollbackFor = Exception.class)
     @PreAuthorize("@ss.hasPermi('ai:model:edit')")
     public Result<Void> setDefault(@PathVariable("id") Long id) {
         SysAiModel model = sysAiModelMapper.selectById(id);
         if (model == null) {
             return Result.error("模型不存在");
         }
+        if (!Integer.valueOf(1).equals(model.getIsActive())) return Result.error("请先启用并验证模型，再设为默认");
+        String validation = validateModelConfiguration(model);
+        if (validation != null) return Result.error(validation);
         // 1. 同 model_type 下全部清默认(唯一性)
         LambdaUpdateWrapper<SysAiModel> clear = new LambdaUpdateWrapper<>();
         clear.eq(SysAiModel::getModelType, model.getModelType())
@@ -206,6 +268,11 @@ public class SysAiModelController {
         set.eq(SysAiModel::getId, id)
                 .set(SysAiModel::getIsDefault, 1);
         sysAiModelMapper.update(null, set);
+        if ("chat".equals(model.getModelType()) && "gpt-6.1-sol".equalsIgnoreCase(model.getModelDeployment())) {
+            sysAiModelMapper.update(null, new LambdaUpdateWrapper<SysAiModel>()
+                    .eq(SysAiModel::getModelType, "chat").eq(SysAiModel::getModelDeployment, "gpt-5.6-sol")
+                    .set(SysAiModel::getIsActive, 0).set(SysAiModel::getIsDefault, 0));
+        }
         aiFactory.clearCache();
         return Result.success();
     }
@@ -217,7 +284,10 @@ public class SysAiModelController {
     @DeleteMapping("/{ids}")
     @PreAuthorize("@ss.hasPermi('ai:model:remove')")
     public Result<Void> remove(@PathVariable Long[] ids) {
-        // In real app, check permission and usage
+        if (generationTasks.selectCount(new LambdaQueryWrapper<GenerationTask>()
+                .in(GenerationTask::getModelId, List.of(ids))) > 0) {
+            return Result.error("模型关联已有出图任务，请停用模型以保留任务和账务记录");
+        }
         sysAiModelMapper.deleteBatchIds(List.of(ids));
         aiFactory.clearCache();
         return Result.success();
@@ -261,6 +331,13 @@ public class SysAiModelController {
                 return Result.success("你好，我的 " + sysAiModel.getModelName() + "，模型对接成功✅");
             } else if ("image".equals(type)) {
                 String baseUrl = sysAiModel.getBaseUrl();
+
+                if ("luxai".equalsIgnoreCase(sysAiModel.getProvider())) {
+                    luxaiImageClient.textToImage(baseUrl, apiKey, sysAiModel.getModelDeployment(),
+                            "A plain white ceramic cup on a neutral background", sysAiModel.getDefaultResolution(),
+                            "1:1", sysAiModel.getImageQuality());
+                    return Result.success("Luxai 图像模型调用成功");
+                }
 
                 // 阿里 DashScope 原生处理
                 if (baseUrl.contains("dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation")) {

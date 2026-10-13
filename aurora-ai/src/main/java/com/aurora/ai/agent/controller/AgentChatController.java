@@ -9,6 +9,7 @@ import com.aurora.ai.agent.billing.InsufficientBeanException;
 import com.aurora.ai.agent.dto.AgentChatRequest;
 import com.aurora.ai.agent.dto.AgentResumeRequest;
 import com.aurora.ai.agent.dto.ConversationVO;
+import com.aurora.ai.agent.dto.ChatRunVO;
 import com.aurora.ai.agent.dto.GenerateImageRequest;
 import com.aurora.ai.agent.dto.GenerationTaskVO;
 import com.aurora.ai.agent.dto.GenerationOptionsVO;
@@ -165,7 +166,8 @@ public class AgentChatController {
         try {
             // 生成页出图不绑定会话(conversationId=null);预扣 + 入队由 service 统一处理
             String taskId = generationTaskService.submitImageGeneration(
-                    userId, null, req.getPrompt(), n, req.getResolution(), req.getAspectRatio(), req.getRefImages());
+                    userId, null, req.getPrompt(), n, req.getResolution(), req.getAspectRatio(), req.getRefImages(),
+                    req.getModelId(), req.getRequestId());
             Map<String, Object> data = new LinkedHashMap<>();
             data.put("taskId", taskId);
             return Result.success(data);
@@ -185,8 +187,14 @@ public class AgentChatController {
 
     /** 读取后台默认图像模型允许的分辨率选项。 */
     @GetMapping("/generation/options")
-    public Result<GenerationOptionsVO> generationOptions() {
-        return Result.success(generationTaskService.getGenerationOptions());
+    public Result<GenerationOptionsVO> generationOptions(@RequestParam(required = false) Long modelId) {
+        return Result.success(generationTaskService.getGenerationOptions(modelId));
+    }
+
+    @GetMapping("/conversations/{conversationId}/run")
+    public Result<ChatRunVO> conversationRun(@PathVariable Long conversationId,
+                                            @RequestAttribute("mobileUserId") Long userId) {
+        return Result.success(agentService.getConversationRun(userId, conversationId));
     }
 
     /** 按当前后台水印配置返回本人任务中指定图片的下载地址。 */
@@ -435,15 +443,7 @@ public class AgentChatController {
      * 出图任务实体转视图:result_urls JSON 串反序列化为字符串列表。
      */
     private GenerationTaskVO toGenerationTaskVO(GenerationTask task) {
-        GenerationTaskVO vo = new GenerationTaskVO();
-        vo.setTaskId(task.getTaskId());
-        vo.setStatus(task.getStatus());
-        vo.setN(task.getN());
-        vo.setSuccessCount(task.getSuccessCount());
-        vo.setResultUrls(parseUrlArray(task.getResultUrls()));
-        vo.setPreviewUrls(toPreviewUrls(vo.getResultUrls()));
-        vo.setErrorMsg(task.getErrorMsg());
-        return vo;
+        return GenerationTaskVO.from(task, objectMapper);
     }
 
     private Result<Map<String, Object>> replayWorkItem(Long userId, String taskId, int seq, boolean failedOnly) {

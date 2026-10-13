@@ -32,6 +32,13 @@ public class BeanDeductAdapter implements IBeanDeductPort {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
+    public long deductUpToBalance(Long userId, long beans, String bizNo, String remark) {
+        membershipExpiryService.settleUserIfExpired(userId);
+        return beanAccountService.deductUpToBalance(userId, beans, bizNo, remark);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
     public void refund(Long userId, long beans, String bizNo, String remark) {
         beanAccountService.refund(userId, beans, bizNo, remark);
         // 先处理尚未结算的到期事件；再覆盖“到期已结算后才晚到退款”的场景。

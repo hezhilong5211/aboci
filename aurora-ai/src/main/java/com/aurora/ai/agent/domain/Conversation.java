@@ -45,6 +45,9 @@ public class Conversation implements Serializable {
      */
     private Long modelId;
 
+    private String runId;
+    private String runStatus;
+
     /**
      * 最近消息时间(列表倒序用)
      */

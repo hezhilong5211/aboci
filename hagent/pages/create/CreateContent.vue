@@ -20,7 +20,8 @@
 					<text class="ai-disclosure-text">生成内容由人工智能生成，请注意辨别</text>
 				</view>
 
-				<!-- 文生图 / 图生图 分段 -->
+				<ModelSelector v-if="userStore.isLoggedIn" label="出图模型" :models="imageModels" :model-value="generationStore.modelId" :disabled="submitting" :loading="modelsLoading" @update:model-value="selectImageModel" />
+					<!-- 文生图 / 图生图 分段 -->
 				<view class="mode-wrap">
 					<AmSegmented v-model="mode" :options="modeOptions" @change="onModeChange" />
 				</view>
@@ -78,7 +79,7 @@
 				<RefImageUploader
 					v-if="mode === 'img2img'"
 					:images="refImages"
-					:max="9"
+					:max="maxReferenceImages"
 					@add="onRefAdd"
 					@remove="onRefRemove"
 					@reorder="onRefReorder"
@@ -177,16 +178,19 @@
 
 <script setup>
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
+import ModelSelector from '@/components/common/ModelSelector.vue'
 import { usePerformanceMode } from '@/composables/usePerformanceMode.js'
 import { usePageScroll } from '@/composables/usePageScroll.js'
 import { useLoginGuard } from '@/composables/useLoginGuard.js'
 import { useGenerationStore } from '@/store/generation.js'
 import { useAccountStore } from '@/store/account.js'
+import { useUserStore } from '@/store/user.js'
 import {
 	generateImage,
 	getGenerationConfig,
 	getGeneration,
 	getGenerationOptions,
+	getAvailableModels,
 	getWorks,
 	getWorkItemDetail,
 	regenerateWorkItem,
@@ -207,6 +211,7 @@ const { requireLogin } = useLoginGuard()
 
 const generationStore = useGenerationStore()
 const accountStore = useAccountStore()
+const userStore = useUserStore()
 
 const props = defineProps({
 	statusBarHeight: { type: Number, default: 44 },
@@ -280,7 +285,11 @@ const promptText = computed({
 	set: (v) => generationStore.setPrompt(v),
 })
 // ====== 参数:比例 / 张数 / 分辨率(绑定 store.params) ======
-const ratioOptions = ['1:1', '3:4', '9:16', '16:9']
+const ratioOptions = ref(['1:1', '3:4', '9:16', '16:9'])
+const imageModels = ref([]), modelsLoading = ref(false)
+const selectedImageModel = computed(() => imageModels.value.find((m) => String(m.modelId) === String(generationStore.modelId)))
+const maxReferenceImages = computed(() => selectedImageModel.value?.maxReferenceImages || 9)
+function selectImageModel(id) { generationStore.setModelId(id); fetchGenerationOptions() }
 const countOptions = [1, 2, 3, 4]
 const resolutionOptions = ref([])
 const resolutionBeanCosts = ref({})
@@ -342,8 +351,15 @@ function selectResolution(value) {
 }
 
 async function fetchGenerationOptions() {
+	if (!userStore.isLoggedIn) return
+	const selectedId = generationStore.modelId
 	try {
-		const data = await getGenerationOptions()
+		const data = await getGenerationOptions(selectedId)
+		if (String(selectedId) !== String(generationStore.modelId)) return
+		if (Array.isArray(data?.aspectRatios) && data.aspectRatios.length) {
+			ratioOptions.value = data.aspectRatios
+			if (!ratioOptions.value.includes(generationStore.params.aspectRatio)) generationStore.setParams({ aspectRatio: ratioOptions.value[0] })
+		}
 		const supported = Array.isArray(data && data.supportedResolutions)
 			? data.supportedResolutions
 				.map((item) => String(item || '').toUpperCase())
@@ -370,6 +386,16 @@ async function fetchGenerationOptions() {
 	}
 }
 
+async function fetchModels() {
+	if (!userStore.isLoggedIn) return
+	modelsLoading.value = true
+	try {
+		const data = await getAvailableModels()
+		imageModels.value = data?.imageModels || []
+		if (!selectedImageModel.value) generationStore.setModelId((imageModels.value.find((m) => m.isDefault === 1 || m.isDefault === true) || imageModels.value[0])?.modelId || null)
+	} catch { /* The server still validates any submitted model. */ }
+	finally { modelsLoading.value = false }
+}
 async function fetchGenerationFeatureConfig() {
 	try {
 		const data = await getGenerationConfig()
@@ -462,6 +488,9 @@ async function handleGenerate() {
 	uni.hideKeyboard()
 
 	const m = generationStore.mode
+	if (!selectedImageModel.value) { uni.showToast({ title: '请选择可用的出图模型', icon: 'none' }); return }
+	if (m === 'img2img' && !selectedImageModel.value.supportsReferenceImages) { uni.showToast({ title: '该模型不支持参考图，请切换模型', icon: 'none' }); return }
+	if (m === 'img2img' && generationStore.refImages.length > maxReferenceImages.value) { uni.showToast({ title: `该模型最多支持 ${maxReferenceImages.value} 张参考图`, icon: 'none' }); return }
 	// 图生图必须有参考图
 	if (m === 'img2img' && generationStore.refImages.length === 0) {
 		uni.showToast({ title: '请先上传参考图', icon: 'none' })
@@ -470,6 +499,7 @@ async function handleGenerate() {
 
 	submitting.value = true
 	const body = {
+		modelId: generationStore.modelId,
 		prompt: promptText.value.trim(),
 		aspectRatio: generationStore.params.aspectRatio,
 		n: generationStore.params.n,
@@ -480,14 +510,15 @@ async function handleGenerate() {
 	if (m === 'img2img') {
 		body.refImages = generationStore.refImages.slice()
 	}
-
 	try {
+		body.requestId = generationStore.requestFor(body, userStore.userInfo?.id || userStore.userInfo?.userId || '')
 		const res = await generateImage(body)
 		const taskId = res && res.taskId
 		if (!taskId) {
 			uni.showToast({ title: '提交失败,请重试', icon: 'none' })
 			return
 		}
+			generationStore.acknowledgeRequest(body.requestId)
 			// 记录本次提交的模式,供结果区布局
 			resultMode.value = m
 			generationStore.setResults([], [], taskId)
@@ -699,6 +730,7 @@ async function reloadCreatePage() {
 	const enabled = await fetchGenerationFeatureConfig()
 	if (!enabled) return
 	fetchRecentWorks()
+	await fetchModels()
 	fetchGenerationOptions()
 }
 

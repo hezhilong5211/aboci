@@ -1,209 +1,80 @@
-/**
- * 会话状态管理
- * 管理当前对话 id、消息列表、流式输出态
- * 消费方:批2 对话流式渲染(当前 actions 为占位)
- */
-
+/** Per-conversation state. Messages stay in memory; server runs recover after relaunch. */
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
+import config from '@/utils/config.js'
 
-const ACTIVE_CONVERSATION_KEY = 'agent_active_conversation_id'
-const ACTIVE_MESSAGE_KEY = 'agent_active_message_id'
-const PENDING_RESUME_KEY = 'agent_pending_resume_task'
-
-function readStoredId(key) {
-	try {
-		const value = uni.getStorageSync(key)
-		return value === '' || value == null ? null : value
-	} catch (e) {
-		return null
-	}
+const STORAGE_KEY = 'agent_conversation_sessions_v2'
+function read(key) { try { return uni.getStorageSync(key) || null } catch { return null } }
+function write(key, value) { try { uni.setStorageSync(key, value) } catch { /* Server remains authoritative. */ } }
+function ownerId() { const user = read(config.userInfoKey); return String(user?.id || user?.userId || '') }
+function newSession(id, saved = {}) {
+	return { conversationId: id, messages: [], streaming: false, recovering: false,
+		activeMessageId: saved.activeMessageId || null, requestId: null, currentThinking: '',
+		modelId: saved.modelId || null, imageModelId: saved.imageModelId || null,
+		pendingResumeTask: saved.pendingResumeTask || null, status: saved.status || '',
+		draft: null, pendingClarification: null, nextCursor: null, hasMore: false }
 }
-
-function persistId(key, value) {
-	try {
-		if (value === '' || value == null) {
-			uni.removeStorageSync(key)
-		} else {
-			uni.setStorageSync(key, value)
-		}
-	} catch (e) {
-		// 本地存储异常不阻断对话主流程。
-	}
-}
-
-function readStoredObject(key) {
-	try {
-		const value = uni.getStorageSync(key)
-		return value && typeof value === 'object' ? value : null
-	} catch (e) {
-		return null
-	}
-}
-
-function persistObject(key, value) {
-	try {
-		if (value) uni.setStorageSync(key, value)
-		else uni.removeStorageSync(key)
-	} catch (e) {
-		// 本地存储异常不阻断对话主流程。
-	}
-}
-
 export const useConversationStore = defineStore('conversation', () => {
-	// ====== 状态 ======
-
-	/** 当前会话 id */
-	const conversationId = ref(readStoredId(ACTIVE_CONVERSATION_KEY))
-	/** 当前执行标识：排队时为 requestId，用户消息落库后替换为 messageId */
-	const activeMessageId = ref(readStoredId(ACTIVE_MESSAGE_KEY))
-	/** 豆子不足后等待支付并恢复的任务。 */
-	const pendingResumeTask = ref(readStoredObject(PENDING_RESUME_KEY))
-	/** 从“我的收藏”回填的一次性草稿，仅保存在当前运行内存中。 */
+	const owner = ref(ownerId())
+	const stored = read(STORAGE_KEY)
+	const saved = stored?.owner === owner.value ? stored : {}
+	const conversationId = ref(saved.activeId || null)
+	const sessions = reactive({})
+	Object.entries(saved.sessions || {}).forEach(([key, value]) => { sessions[key] = newSession(value.conversationId, value) })
 	const promptDraft = ref(null)
-	/** 消息列表 */
-	const messages = ref([])
-	/** 是否正在流式输出 */
-	const streaming = ref(false)
-	/** 当前思考过程文本 */
-	const currentThinking = ref('')
-
-	// ====== 方法 ======
-
-	/**
-	 * 追加一条消息
-	 * @param {Object} m
-	 */
-	function addMessage(m) {
-		messages.value.push(m)
+	function getSession(id = conversationId.value) {
+		const key = id == null ? 'draft' : String(id)
+		if (!sessions[key]) sessions[key] = newSession(id)
+		return sessions[key]
 	}
-
-	/**
-	 * 向最后一条消息追加文本(流式拼接)
-	 * @param {string} t
-	 */
-	function appendText(t) {
-		const last = messages.value[messages.value.length - 1]
-		if (last) {
-			last.content = (last.content || '') + t
-		}
+	const currentSession = computed(() => getSession())
+	function persist() {
+		const metadata = {}
+		Object.entries(sessions).forEach(([key, s]) => { metadata[key] = {
+			conversationId: s.conversationId, activeMessageId: s.activeMessageId,
+			modelId: s.modelId, imageModelId: s.imageModelId, pendingResumeTask: s.pendingResumeTask, status: s.status,
+		} })
+		write(STORAGE_KEY, { owner: owner.value, activeId: conversationId.value, sessions: metadata })
 	}
-
-	/**
-	 * 设置流式输出态
-	 * @param {boolean} b
-	 */
-	function setStreaming(b) {
-		streaming.value = b
+	function syncOwner() {
+		const next = ownerId()
+		if (next === owner.value) return false
+		Object.keys(sessions).forEach((key) => delete sessions[key])
+		owner.value = next; conversationId.value = null; promptDraft.value = null; persist()
+		return true
 	}
-
-	/**
-	 * 设置会话 id
-	 * @param {string|null} id
-	 */
+	const field = (name) => computed({ get: () => currentSession.value[name], set: (value) => { currentSession.value[name] = value } })
+	const messages = field('messages'), streaming = field('streaming'), currentThinking = field('currentThinking')
+	const activeMessageId = field('activeMessageId'), pendingResumeTask = field('pendingResumeTask')
 	function setConversationId(id) {
-		conversationId.value = id
-		persistId(ACTIVE_CONVERSATION_KEY, id)
+		// A newly created server conversation inherits the draft model selection.
+		if (conversationId.value == null && id != null && !sessions[String(id)]) {
+			const draft = getSession(null)
+			sessions[String(id)] = newSession(id, draft)
+		}
+		conversationId.value = id; getSession(id); persist()
 	}
-
-	/**
-	 * 设置仍在服务端执行的请求/消息标识
-	 * @param {string|number|null} id
-	 */
-	function setActiveMessageId(id) {
-		activeMessageId.value = id
-		persistId(ACTIVE_MESSAGE_KEY, id)
+	function setActiveMessageId(id, conversation = conversationId.value) { getSession(conversation).activeMessageId = id; persist() }
+	function setStreaming(value, conversation = conversationId.value) { getSession(conversation).streaming = value }
+	function setModels(modelId, imageModelId, conversation = conversationId.value) {
+		const s = getSession(conversation); s.modelId = modelId; s.imageModelId = imageModelId; persist()
 	}
-
-	/**
-	 * 用服务端快照替换当前消息列表
-	 * @param {Array} list
-	 */
-	function replaceMessages(list) {
-		messages.value = Array.isArray(list) ? list : []
-	}
-
-	/**
-	 * 原子切换当前会话快照，避免会话编号和消息列表分帧更新。
-	 */
-	function replaceConversationSnapshot(id, list) {
-		setConversationId(id)
-		messages.value = Array.isArray(list) ? list : []
-	}
-
-	/**
-	 * 向当前消息列表前插更早历史，按消息编号去重。
-	 */
+	function replaceMessages(list) { currentSession.value.messages = Array.isArray(list) ? list : [] }
+	function replaceConversationSnapshot(id, list) { setConversationId(id); replaceMessages(list) }
+	function addMessage(message) { currentSession.value.messages.push(message) }
+	function appendText(text) { const last = messages.value[messages.value.length - 1]; if (last) last.content = (last.content || '') + text }
 	function prependMessages(list) {
-		if (!Array.isArray(list) || !list.length) return
-		const existing = new Set(
-			messages.value.map((item) => item && (item.renderKey || item.id)).filter(Boolean)
-		)
-		const older = list.filter((item) => {
-			const key = item && (item.renderKey || item.id)
-			return key == null || !existing.has(key)
-		})
-		if (older.length) messages.value = older.concat(messages.value)
+		const ids = new Set(messages.value.map((m) => m.renderKey || m.id))
+		messages.value = (list || []).filter((m) => !ids.has(m.renderKey || m.id)).concat(messages.value)
 	}
-
-	function setPendingResumeTask(task) {
-		pendingResumeTask.value = task || null
-		persistObject(PENDING_RESUME_KEY, pendingResumeTask.value)
-	}
-
-	function markPendingResumeReady() {
-		if (!pendingResumeTask.value) return
-		setPendingResumeTask({ ...pendingResumeTask.value, ready: true })
-	}
-
-	function clearPendingResumeTask() {
-		setPendingResumeTask(null)
-	}
-
-	function setPromptDraft(content) {
-		promptDraft.value = typeof content === 'string' && content.trim()
-			? content.trim()
-			: null
-	}
-
-	function takePromptDraft() {
-		const draft = promptDraft.value
-		promptDraft.value = null
-		return draft
-	}
-
-	/**
-	 * 重置会话态(开启新对话)
-	 */
-	function reset() {
-		setConversationId(null)
-		setActiveMessageId(null)
-		messages.value = []
-		streaming.value = false
-		currentThinking.value = ''
-	}
-
-	return {
-		conversationId,
-		activeMessageId,
-		pendingResumeTask,
-		promptDraft,
-		messages,
-		streaming,
-		currentThinking,
-		addMessage,
-		appendText,
-		setStreaming,
-		setConversationId,
-		setActiveMessageId,
-		replaceMessages,
-		replaceConversationSnapshot,
-		prependMessages,
-		setPendingResumeTask,
-		markPendingResumeReady,
-		clearPendingResumeTask,
-		setPromptDraft,
-		takePromptDraft,
-		reset
-	}
+	function setPendingResumeTask(task, conversation = task?.conversationId ?? conversationId.value) { getSession(conversation).pendingResumeTask = task || null; persist() }
+	function clearPendingResumeTask(conversation = conversationId.value) { setPendingResumeTask(null, conversation) }
+	function markPendingResumeReady() { if (pendingResumeTask.value) setPendingResumeTask({ ...pendingResumeTask.value, ready: true }) }
+	function setPromptDraft(content) { promptDraft.value = typeof content === 'string' ? content.trim() : null }
+	function takePromptDraft() { const value = promptDraft.value; promptDraft.value = null; return value }
+	function reset() { sessions.draft = newSession(null); conversationId.value = null; persist() }
+	return { conversationId, sessions, currentSession, messages, streaming, currentThinking, activeMessageId,
+		pendingResumeTask, promptDraft, getSession, persist, syncOwner, setModels, setConversationId,
+		setActiveMessageId, setStreaming, replaceMessages, replaceConversationSnapshot, addMessage, appendText,
+		prependMessages, setPendingResumeTask, clearPendingResumeTask, markPendingResumeReady, setPromptDraft, takePromptDraft, reset }
 })

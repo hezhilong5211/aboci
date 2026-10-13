@@ -4,9 +4,12 @@ import com.aurora.ai.agent.billing.BillingCalculator;
 import com.aurora.ai.agent.billing.IBeanDeductPort;
 import com.aurora.ai.agent.billing.InsufficientBeanException;
 import com.aurora.ai.agent.domain.Conversation;
+import com.aurora.ai.agent.domain.ChatRun;
+import com.aurora.ai.agent.domain.GenerationTask;
 import com.aurora.ai.agent.domain.MessageAttachment;
 import com.aurora.ai.agent.domain.Message;
 import com.aurora.ai.agent.dto.ClaimedReferenceScope;
+import com.aurora.ai.agent.dto.ChatRunVO;
 import com.aurora.ai.agent.dto.AgentChatRequest;
 import com.aurora.ai.agent.dto.AgentResumeRequest;
 import com.aurora.ai.agent.dto.AgentImageInput;
@@ -39,6 +42,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
 import reactor.core.Disposable;
 import reactor.core.scheduler.Schedulers;
+import reactor.core.scheduler.Scheduler;
 
 import java.math.BigDecimal;
 
@@ -47,6 +51,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashSet;
@@ -135,6 +141,14 @@ public class AgentService {
     private final ConcurrentMap<Long, ActiveRun> activeRuns = new ConcurrentHashMap<>();
     /** 活跃对话按客户端请求 id 登记，覆盖用户消息落库前的排队阶段。 */
     private final ConcurrentMap<String, ActiveRun> requestRuns = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Sinks.Many<String>, ActiveRun> sinkRuns = new ConcurrentHashMap<>();
+    private Scheduler orchestrationScheduler = Schedulers.boundedElastic();
+
+    @Autowired(required = false)
+    private ChatRunService chatRunService;
+
+    @Autowired(required = false)
+    private ConversationMemoryService memoryService;
 
     /**
      * 豆子扣减端口(跨模块 SPI):由 aurora-admin 的 BeanDeductAdapter 实现。
@@ -192,15 +206,96 @@ public class AgentService {
     public Flux<String> chatStream(Long userId, AgentChatRequest req) {
         Sinks.Many<String> sink = Sinks.many().unicast().onBackpressureBuffer();
         ActiveRun activeRun = new ActiveRun(userId);
+        if (chatRunService != null) {
+            try {
+                if (req == null) throw new ServiceException("对话请求不能为空");
+                String requestId = StringUtils.hasText(req.getRequestId())
+                        ? req.getRequestId().trim() : UUID.randomUUID().toString();
+                if (requestId.length() > 64) throw new ServiceException("请求编号过长");
+                req.setRequestId(requestId);
+                String fingerprint = requestFingerprint(req);
+                ChatRun existing = chatRunService.findRequest(userId, requestId);
+                if (existing != null) {
+                    chatRunService.assertSameRequest(existing, fingerprint, req.getConversationId());
+                    return replayRun(existing);
+                }
+                Conversation conversation = resolveConversation(userId, req);
+                req.setConversationId(conversation.getId());
+                ChatRun resumed = chatRunService.findSource(userId, req.getResumeMessageId());
+                SysAiModel model = resumed == null ? resolveChatModel(req.getModelId())
+                        : aiModelMapper.selectById(resumed.getModelId());
+                if (model == null) throw new ServiceException("原任务对话模型已不可用");
+                Long imageModelId = resumed == null ? req.getImageModelId() : resumed.getImageModelId();
+                if (imageModelId == null) {
+                    try { imageModelId = generationTaskService.getGenerationOptions().getModelId(); }
+                    catch (ServiceException ignored) { /* Text-only conversations can work without an image channel. */ }
+                }
+                ChatRunService.Reservation reservation = chatRunService.reserve(userId, conversation.getId(), requestId,
+                        fingerprint, model, imageModelId, resumed);
+                if (!reservation.created()) return replayRun(reservation.run());
+                activeRun.persisted = reservation.run();
+                activeRun.chatModel = chatRunService.applyBillingSnapshot(activeRun.persisted, model);
+                req.setModelId(activeRun.persisted.getModelId());
+                req.setImageModelId(activeRun.persisted.getImageModelId());
+            } catch (ServiceException e) {
+                return Flux.just(AgentSseEvent.error(e.getMessage()).toJsonLine());
+            }
+        }
+        sinkRuns.put(sink, activeRun);
         String requestRunKey = requestRunKey(userId, req == null ? null : req.getRequestId());
+        activeRun.onQueuedCancellation = () -> {
+            cleanupRun(sink, activeRun, requestRunKey);
+            sink.tryEmitComplete();
+        };
         if (requestRunKey != null) {
-            requestRuns.put(requestRunKey, activeRun);
+            if (requestRuns.putIfAbsent(requestRunKey, activeRun) != null) {
+                sinkRuns.remove(sink);
+                return Flux.just(AgentSseEvent.error("原任务已在处理中，请勿重复提交").toJsonLine());
+            }
         }
         // 阻塞编排(HTTP 流式读 + 落库)放 boundedElastic,避免占用响应式线程
-        Disposable worker = Schedulers.boundedElastic()
+        Disposable worker = orchestrationScheduler
                 .schedule(() -> runQueuedOrchestration(userId, req, sink, activeRun, requestRunKey));
         activeRun.attach(worker);
         return sink.asFlux();
+    }
+
+    public ChatRunVO getConversationRun(Long userId, Long conversationId) {
+        if (conversationService.getOwned(conversationId, userId) == null) {
+            throw new ServiceException("会话不存在或无权访问");
+        }
+        return chatRunService == null ? null : chatRunService.getOwned(userId, conversationId);
+    }
+
+    private Flux<String> replayRun(ChatRun run) {
+        if (conversationService.getOwned(run.getConversationId(), run.getUserId()) == null) {
+            throw new ServiceException("会话不存在或无权访问");
+        }
+        ChatRunVO snapshot = chatRunService.toView(run);
+        List<String> events = new ArrayList<>();
+        AgentSseEvent meta = AgentSseEvent.meta(snapshot.getConversationId(), snapshot.getMessageId());
+        meta.setRunId(snapshot.getRunId());
+        meta.setRequestId(snapshot.getRequestId());
+        meta.setStatus(snapshot.getStatus());
+        events.add(meta.toJsonLine());
+        if (StringUtils.hasText(snapshot.getThinking())) events.add(AgentSseEvent.thinking(snapshot.getThinking()).toJsonLine());
+        if (StringUtils.hasText(snapshot.getText())) events.add(AgentSseEvent.text(snapshot.getText()).toJsonLine());
+        if (snapshot.getResult() != null) events.add(AgentSseEvent.result(snapshot.getResult()).toJsonLine());
+        if (snapshot.getClarification() != null) events.add(AgentSseEvent.clarification(snapshot.getClarification()).toJsonLine());
+        if (StringUtils.hasText(snapshot.getErrorMessage())) events.add(AgentSseEvent.error(snapshot.getErrorMessage()).toJsonLine());
+        events.add(AgentSseEvent.done().toJsonLine());
+        return Flux.fromIterable(events);
+    }
+
+    private String requestFingerprint(AgentChatRequest req) {
+        try {
+            ObjectNode value = objectMapper.valueToTree(req);
+            value.remove(List.of("requestId", "conversationId"));
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(value.toString().getBytes(StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (Exception e) {
+            throw new ServiceException("对话请求无法保存");
+        }
     }
 
     /** 恢复已通过安全审核并落库、但因豆子不足尚未产生助手回复的最后一条用户消息。 */
@@ -220,6 +315,11 @@ public class AgentService {
     /** 先进入全局对话并发闸，再执行编排；等待阶段不落库、不计费、不调用模型。 */
     private void runQueuedOrchestration(Long userId, AgentChatRequest req, Sinks.Many<String> sink,
                                         ActiveRun activeRun, String requestRunKey) {
+        if (!activeRun.beginExecution()) {
+            cleanupRun(sink, activeRun, requestRunKey);
+            sink.tryEmitComplete();
+            return;
+        }
         boolean acquired = false;
         try {
             ensureActive(activeRun.cancelled);
@@ -238,13 +338,23 @@ public class AgentService {
         } catch (CancellationException e) {
             sink.tryEmitComplete();
         } finally {
-            if (requestRunKey != null) {
-                requestRuns.remove(requestRunKey, activeRun);
-            }
+            cleanupRun(sink, activeRun, requestRunKey);
             if (acquired) {
                 apiRateLimiter.release("chat");
             }
         }
+    }
+
+    private void cleanupRun(Sinks.Many<String> sink, ActiveRun run, String requestRunKey) {
+        if (!run.cleaned.compareAndSet(false, true)) return;
+        if (chatRunService != null && run.persisted != null) {
+            String status = run.cancelled.get() ? "CANCELLED" : run.persisted.getStatus();
+            if ("QUEUED".equals(status) || "RUNNING".equals(status)) status = "FAILED";
+            try { chatRunService.finish(run.persisted, status); }
+            catch (Exception e) { log.error("运行状态收尾失败: runId={}", run.persisted.getId(), e); }
+        }
+        sinkRuns.remove(sink);
+        if (requestRunKey != null) requestRuns.remove(requestRunKey, run);
     }
 
     /**
@@ -329,6 +439,8 @@ public class AgentService {
         boolean settled = false;
         List<AgentResult.ImageRef> collectedImages = new ArrayList<>();
         ToolExecutionState toolState = new ToolExecutionState();
+        toolState.imageModelId = req.getImageModelId();
+        toolState.requestId = req.getRequestId();
         try {
             ensureActive(activeRun.cancelled);
             Message resumedUserMessage = resolveResumedUserMessage(userId, req);
@@ -378,6 +490,7 @@ public class AgentService {
             // 用户消息一旦落库即视为本次使用，失败/余额不足也不能沿用旧到期时间。
             conversationService.touch(conversationId);
             messageId = userMessage.getId();
+            if (chatRunService != null) chatRunService.bindMessage(activeRun.persisted, messageId);
             ActiveRun existingRun = activeRuns.putIfAbsent(messageId, activeRun);
             if (existingRun != null) {
                 emit(sink, AgentSseEvent.error("原任务已在继续处理中，请勿重复提交"));
@@ -411,7 +524,12 @@ public class AgentService {
                 if (!activeRun.beginFinalization()) {
                     throw new CancellationException("用户停止对话");
                 }
-                persistAssistant(conversationId, userId, "", directResult, collectedImages, toolState);
+                Message directMessage = persistAssistant(conversationId, userId, "", directResult, collectedImages, toolState);
+                if (chatRunService != null && directMessage != null) {
+                    chatRunService.bindAssistant(activeRun.persisted, directMessage.getId());
+                    chatRunService.finish(activeRun.persisted, toolState.clarificationRequested
+                            ? "WAITING_CONFIRMATION" : "COMPLETED");
+                }
                 conversationService.touch(conversationId);
                 emit(sink, AgentSseEvent.done());
                 sink.tryEmitComplete();
@@ -424,6 +542,12 @@ public class AgentService {
                     ? List.of()
                     : messageService.recentForContext(conversationId, RECENT_CONTEXT_LIMIT + 1);
             String runtimeContext = buildRuntimeContext(referenceContext);
+            chatModel = activeRun.chatModel != null ? activeRun.chatModel : resolveChatModel(req.getModelId());
+            if (memoryService != null) {
+                ConversationMemoryService.Context memory = memoryService.prepare(userId, conversationId, messageId, chatModel);
+                recent = memory.recentMessages();
+                runtimeContext = runtimeContext + "\n" + memory.memoryPrompt();
+            }
             String effectiveSkill = StringUtils.hasText(req.getSkill())
                     ? req.getSkill() : referenceContext.skillName();
             PromptAssembler.AssembledPrompt assembled = promptAssembler.assembleSystemPrompt(
@@ -446,7 +570,7 @@ public class AgentService {
             messages.add(userMessage(req.getMessage(), referenceContext));
 
             // 4. 解析默认多模态对话模型并执行多轮工具循环
-            chatModel = resolveChatModel(req.getModelId());
+            // The selected model and rates are fixed before queueing for persisted runs.
 
             // 收集 generate_images 产生的 taskId 及其递增 seq,供末尾 result.images 覆盖/补全;
             // submittedResults 收 submit_result 工具提交的结构化产出(主通道)
@@ -489,6 +613,9 @@ public class AgentService {
             // 落 assistant message:有结构化产出存其 JSON(structured),否则存纯文本(text)
             Message assistantMessage = persistAssistant(
                     conversationId, userId, finalText, agentResult, collectedImages, toolState);
+            if (chatRunService != null && assistantMessage != null) {
+                chatRunService.bindAssistant(activeRun.persisted, assistantMessage.getId());
+            }
 
             // 文本事后结算:正常结束按累计 token 算费扣豆,并把 token_usage/bean_cost 写回 assistant 消息
             // 先关闭本次重试入口；结算内若“扣豆成功、消息回写失败”，不得在外层再次扣费。
@@ -501,6 +628,9 @@ public class AgentService {
 
             // 更新会话最近消息时间
             conversationService.touch(conversationId);
+
+            if (chatRunService != null) chatRunService.finish(activeRun.persisted,
+                    toolState.clarificationRequested ? "WAITING_CONFIRMATION" : "COMPLETED");
 
             emit(sink, AgentSseEvent.done());
             sink.tryEmitComplete();
@@ -515,6 +645,9 @@ public class AgentService {
                 if (conversation != null && messageId != null) {
                     Message stoppedMessage = persistAssistant(conversation.getId(), userId,
                             "对话已停止", null, List.of(), null);
+                    if (chatRunService != null && stoppedMessage != null) {
+                        chatRunService.bindAssistant(activeRun.persisted, stoppedMessage.getId());
+                    }
                     if (!settled && chatModel != null && usage.hasAny()) {
                         settled = true;
                         try {
@@ -538,8 +671,11 @@ public class AgentService {
             // 余额不足仍沿用“最后一条为 user”的充值续跑契约。
             if (!settled && !(e instanceof InsufficientBeanException) && conversation != null && messageId != null) {
                 try {
-                    persistAssistant(conversation.getId(), userId, failureMessage,
+                    Message failure = persistAssistant(conversation.getId(), userId, failureMessage,
                             mergeImages(null, collectedImages), collectedImages, null);
+                    if (chatRunService != null && failure != null) {
+                        chatRunService.bindAssistant(activeRun.persisted, failure.getId());
+                    }
                     conversationService.touch(conversation.getId());
                 } catch (Exception persistError) {
                     log.error("保存对话失败结果异常: conversationId={}, messageId={}",
@@ -642,13 +778,8 @@ public class AgentService {
                 userId, usage.promptTokens, usage.cachedTokens, usage.completionTokens, beans);
         long actual = 0;
         if (beans > 0) {
-            // 事后实扣可能 > 余额(罕见):取 min(应扣,余额) 扣至清零,不透支
-            long balance = beanDeductPort.getBalance(userId);
-            actual = Math.min(beans, balance);
-            if (actual > 0) {
-                Long bizMsgId = (message != null) ? message.getId() : fallbackMsgId;
-                beanDeductPort.deduct(userId, actual, "msg:" + bizMsgId, "AI对话");
-            }
+            Long bizMsgId = (message != null) ? message.getId() : fallbackMsgId;
+            actual = beanDeductPort.deductUpToBalance(userId, beans, "msg:" + bizMsgId, "AI对话");
         }
         // 写回总 token 与实扣豆子(无 assistant 消息时跳过)
         if (message != null) {
@@ -752,6 +883,8 @@ public class AgentService {
                 return toolState.clarificationQuestion;
             }
 
+            appendSelectedHistory(messages, toolState, false);
+
             // 强契约防遗忘:工具回灌后补一条 system 提醒,抵消多轮长上下文对末尾结构化要求的稀释
             if (contractStrong) {
                 messages.add(textMessage("system", CONTRACT_REMINDER));
@@ -815,6 +948,8 @@ public class AgentService {
             if (toolState.clarificationRequested) {
                 return toolState.clarificationQuestion;
             }
+
+            appendSelectedHistory(input, toolState, true);
 
             if (contractStrong) {
                 ObjectNode reminder = input.addObject();
@@ -1083,6 +1218,10 @@ public class AgentService {
                                List<AgentResult.ImageRef> collectedImages, ToolExecutionState toolState,
                                List<AgentResult> submittedResults) {
         JsonNode args = parseArguments(toolCall.arguments);
+        if (toolState.selectedHistory != null) referenceContext = toolState.selectedHistory;
+        if ("select_history_images".equals(toolCall.name)) {
+            return selectHistoryImages(args, userId, conversationId, sourceMessageId, referenceContext, toolState);
+        }
         if ("submit_result".equals(toolCall.name)) {
             if (toolState.clarificationRequested) {
                 return toolError("本轮已请求澄清，请直接结束并等待用户回复");
@@ -1097,6 +1236,10 @@ public class AgentService {
             return result;
         }
         if ("generate_images".equals(toolCall.name)) {
+            if (toolState.historyPending) {
+                return toolError("历史素材已精确加载，下一轮先查看图片和附件ID，再提交完整生成计划");
+            }
+            toolState.toolCallId = toolCall.id;
             int n = args.path("jobs").size();
             emit(sink, AgentSseEvent.tool("generate_images", "running", "正在提交出图"));
             String result;
@@ -1170,6 +1313,115 @@ public class AgentService {
             log.warn("submit_result 参数解析失败: {}", e.getMessage());
             return "{\"error\":\"参数不是合法的 JSON 对象,请修正后重新调用 submit_result\"}";
         }
+    }
+
+    private String selectHistoryImages(JsonNode args, Long userId, Long conversationId, Long messageId,
+                                        ReferenceContext current, ToolExecutionState state) {
+        if (state.submitted || state.clarificationRequested || state.selectedHistory != null) {
+            return toolError("本轮素材范围已确定，不能再次添加历史图片");
+        }
+        Message source = messageService.getById(messageId);
+        if (source == null || !userId.equals(source.getUserId()) || !conversationId.equals(source.getConversationId())) {
+            throw new ServiceException("消息不存在或无权访问");
+        }
+        String request = source.getContent() == null ? "" : source.getContent();
+        boolean mentionsHistory = Pattern.compile("之前|前面|以前|上次|上一|刚才|历史|第.{0,3}张|previous|earlier|last", Pattern.CASE_INSENSITIVE)
+                .matcher(request).find();
+        boolean mentionsImage = Pattern.compile("图|照片|海报|作品|成品|素材|那张|这张|image|photo|picture", Pattern.CASE_INSENSITIVE)
+                .matcher(request).find();
+        if (!mentionsHistory || !mentionsImage) return toolError("用户本轮没有明确引用历史图片，不能自动加载旧素材");
+        JsonNode generated = args.path("generated_images");
+        JsonNode ids = args.path("attachment_ids");
+        if ((!generated.isMissingNode() && !generated.isArray()) || (!ids.isMissingNode() && !ids.isArray())) {
+            return toolError("历史素材必须按task_id/seq或attachment_ids数组精确指定");
+        }
+        int count = generated.size() + ids.size();
+        if (count < 1 || count + current.images().size() > MAX_INPUT_IMAGES) {
+            return toolError("请选择1至9张明确的历史素材，连同当前素材合计不能超过9张");
+        }
+        List<ReferenceImage> selected = new ArrayList<>(current.images());
+        List<MessageAttachmentDraft> drafts = new ArrayList<>();
+        ArrayNode media = objectMapper.createArrayNode();
+        try {
+            if (StringUtils.hasText(source.getMedia())) {
+                JsonNode original = objectMapper.readTree(source.getMedia());
+                if (original.isArray()) original.forEach(item -> media.add(item.deepCopy()));
+            }
+            Set<String> selectedSources = new HashSet<>();
+            for (JsonNode image : generated) {
+                String taskId = image.path("task_id").asText(null);
+                int seq = image.path("seq").asInt(0);
+                if (!StringUtils.hasText(taskId) || seq < 1 || !selectedSources.add(taskId + ":" + seq)) {
+                    return toolError("历史作品编号或顺序无效，请按索引选择，不能重复");
+                }
+                GenerationTask task = generationTaskService.getOwned(taskId, userId);
+                if (task == null || !conversationId.equals(task.getConversationId())
+                        || (task.getMessageId() != null && task.getMessageId() >= messageId)
+                        || !"SUCCEEDED".equals(task.getStatus())) {
+                    return toolError("历史作品不存在、尚未完成或不属于本会话");
+                }
+                JsonNode urls = objectMapper.readTree(task.getResultUrls());
+                if (!urls.isArray() || seq > urls.size() || !urls.get(seq - 1).isTextual()
+                        || normalizeProfileUrl(urls.get(seq - 1).asText()) == null) {
+                    return toolError("该序号是失败或已失效的图片，不能移动编号或替换为其他图");
+                }
+                String url = normalizeProfileUrl(urls.get(seq - 1).asText());
+                if (selected.stream().anyMatch(item -> item.url().equals(url))) return toolError("该历史图片已在本轮素材中");
+                String attachmentId = UUID.randomUUID().toString().replace("-", "");
+                selected.add(new ReferenceImage(attachmentId, url));
+                drafts.add(new MessageAttachmentDraft(attachmentId, selected.size(), "GENERATED", url, taskId, seq));
+                media.addObject().put("type", "generated").put("url", url).put("taskId", taskId).put("seq", seq);
+            }
+            List<String> attachmentIds = new ArrayList<>();
+            for (JsonNode id : ids) {
+                if (!id.isTextual() || !selectedSources.add(id.asText())) return toolError("历史附件ID无效或重复");
+                attachmentIds.add(id.asText());
+            }
+            if (!attachmentIds.isEmpty()) {
+                List<MessageAttachment> owned = messageAttachmentService.listOwnedOrdered(conversationId, userId, attachmentIds);
+                if (owned.size() != attachmentIds.size()) return toolError("历史附件不存在或不属于本会话");
+                for (MessageAttachment attachment : owned) {
+                    if (attachment.getMessageId() >= messageId || selected.stream().anyMatch(item ->
+                            item.attachmentId().equals(attachment.getAttachmentId()) || item.url().equals(attachment.getProfileUrl()))) {
+                        return toolError("只能选择尚未提供的历史附件");
+                    }
+                    String attachmentId = UUID.randomUUID().toString().replace("-", "");
+                    selected.add(new ReferenceImage(attachmentId, attachment.getProfileUrl()));
+                    drafts.add(new MessageAttachmentDraft(attachmentId, selected.size(), attachment.getSourceType(),
+                            attachment.getProfileUrl(), attachment.getSourceTaskId(), attachment.getSourceSeq()));
+                    ObjectNode mediaRef = media.addObject().put("type", "GENERATED".equals(attachment.getSourceType()) ? "generated" : "upload")
+                            .put("url", attachment.getProfileUrl()).put("sourceAttachmentId", attachment.getAttachmentId());
+                    if (attachment.getSourceTaskId() != null) mediaRef.put("taskId", attachment.getSourceTaskId()).put("seq", attachment.getSourceSeq());
+                }
+            }
+            // Load only selected media before freezing the scope; unreadable files cannot become references.
+            for (ReferenceImage image : selected) toMultimodalImageUrl(image.url());
+            messageService.appendUserAttachments(userId, messageId, media.toString(), drafts);
+            state.selectedHistory = new ReferenceContext(current.sourceMessageId(), current.sourcePrompt(), List.copyOf(selected),
+                    current.continued(), current.clarificationContextJson(), current.clarificationRound(),
+                    current.askedClarificationKeys(), current.clarificationAnswerSummary(), current.skillName());
+            state.historyPending = true;
+            ObjectNode result = objectMapper.createObjectNode().put("status", "SELECTED");
+            result.set("selection", args.deepCopy());
+            ArrayNode refs = result.putArray("references");
+            for (ReferenceImage image : selected) refs.addObject().put("attachment_id", image.attachmentId());
+            result.put("instruction", "已加载精确选定的历史图片，下一轮查看后再生成；不能把未选择的历史素材加入任务");
+            return result.toString();
+        } catch (ServiceException e) {
+            return toolError(e.getMessage());
+        } catch (Exception e) {
+            return toolError("历史素材读取失败，请确认图片尚在本会话中");
+        }
+    }
+
+    private void appendSelectedHistory(ArrayNode messages, ToolExecutionState state, boolean responses) {
+        if (!state.historyPending) return;
+        ObjectNode selected = userMessage("【用户本轮明确引用的历史图片，已由后端按稳定ID校验并加载】", state.selectedHistory);
+        if (responses) {
+            ArrayNode wrapper = objectMapper.createArrayNode().add(selected);
+            toResponsesInput(wrapper).forEach(messages::add);
+        } else messages.add(selected);
+        state.historyPending = false;
     }
 
     /**
@@ -1450,9 +1702,8 @@ public class AgentService {
         String aspectRatio = args.path("aspect_ratio").asText(null);
         try {
             // 对话内清晰度固定走后台默认,因此 resolution 传 null。
-            String taskId = generationTaskService.submitImageBatch(
-                    userId, conversationId, sourceMessageId, items,
-                    null, emptyToNull(aspectRatio), normalizedImages);
+            String taskId = submitSelectedImageBatch(userId, conversationId, sourceMessageId, items,
+                    emptyToNull(aspectRatio), normalizedImages, toolState);
             toolState.submitted = true;
 
             for (int i = 0; i < items.size(); i++) {
@@ -1538,9 +1789,9 @@ public class AgentService {
 
         emit(sink, AgentSseEvent.tool("generate_images", "running", "正在提交出图"));
         try {
-            String taskId = generationTaskService.submitImageBatch(
-                    userId, conversationId, sourceMessageId, selectedItems,
-                    null, aspectRatio, normalizedImages);
+            state.toolCallId = "balance-plan";
+            String taskId = submitSelectedImageBatch(userId, conversationId, sourceMessageId, selectedItems,
+                    aspectRatio, normalizedImages, state);
             state.submitted = true;
             for (int i = 0; i < selectedItems.size(); i++) {
                 AgentResult.ImageRef ref = new AgentResult.ImageRef();
@@ -1963,6 +2214,7 @@ public class AgentService {
                 .append("7.0. job.prompt中所有图片引用必须使用[[ref:附件ID]]，例如[[ref:abc]]提供材质，附件ID原样取自可用素材。不得写原图号、图片序号、输入图号或猜测附图位置；后端依据reference_attachment_ids实际顺序统一替换标记并生成职责表。各张请求互不共享上下文，禁止用“与成品1一致”“同上一张”代替完整要求。\n")
                 .append("7.01. 对用户要求保持的关键属性，从指定参考图提取简短、可见的具体特征，在适用任务中复用同一描述；不得从其他图片补入该属性，不编造不可见细节，不改变用户指定职责。提交前对照原始要求核对每个job的遗漏、冲突和例外；重要冲突先按用户明确优先级处理，仍无法消解再澄清。\n")
                 .append("7.1. 用户主动添加的历史作品是本次素材；未选择的历史图片和本任务尚未生成的结果不得作为输入。多角度系列直接复用相同的原始人物、发型、服装和环境依据。\n")
+                .append("7.11. 用户本轮明确引用之前的图片时，可用select_history_images按历史索引中的task_id/seq或attachment_id精确加载；仅加载语义明确的目标。多个候选无法唯一确定时先澄清，不能默认全部加载。工具加载后必须下一轮查看实际图片和新附件ID再规划生成。历史用途描述是生成请求摘要，不证明图片实际内容。\n")
                 .append("7.2. 用户明确要求精确引用本任务首张时，说明当前不支持，需用户将已有成品主动添加为新任务素材；没有人物素材时仅能统一文字描述，不承诺严格同脸。\n")
                 .append("7.3. 每个job必须提供reference_bindings覆盖每张实际引用图。source_type固定original，source_id为附件ID；attributes为通用属性数组，同一对象的同一属性只有一个primary，其余为detail。多主体使用subject_a.identity等对象作用域。用户明确职责优先于图片内容和Skill，不得擅自混用；未指定时才根据画面识别用途。\n")
                 .append("7.5. 有新完整要求和完整新图组时使用REPLACE并按本条新上传编号绑定；AMEND只覆盖明确修改的内容，CONFIRM不重写已确认要求。删除或增加输出时，effective_request必须完整表达保留、删除和新增后的产出清单与总数，不要求用户使用固定措辞。无关历史对话不能覆盖当前契约。每项执行条件必须完整，禁止引用其他输出。\n")
@@ -2510,6 +2762,22 @@ public class AgentService {
     private ArrayNode buildTools() {
         ArrayNode tools = objectMapper.createArrayNode();
 
+        ObjectNode history = tools.addObject().put("type", "function");
+        ObjectNode historyFn = history.putObject("function").put("name", "select_history_images");
+        historyFn.put("description", "仅在用户本轮明确引用历史图片时按稳定ID选择本会话已经存在的素材；有歧义先澄清，不自动回带所有历史图。加载后下一轮查看图片再生成。");
+        ObjectNode historyParams = historyFn.putObject("parameters").put("type", "object");
+        ObjectNode historyProps = historyParams.putObject("properties");
+        ObjectNode generated = historyProps.putObject("generated_images").put("type", "array").put("maxItems", 9);
+        ObjectNode generatedItem = generated.putObject("items").put("type", "object");
+        ObjectNode generatedProps = generatedItem.putObject("properties");
+        generatedProps.putObject("task_id").put("type", "string");
+        generatedProps.putObject("seq").put("type", "integer").put("minimum", 1).put("maximum", 9);
+        generatedItem.putArray("required").add("task_id").add("seq");
+        generatedItem.put("additionalProperties", false);
+        ObjectNode oldAttachments = historyProps.putObject("attachment_ids").put("type", "array").put("maxItems", 9);
+        oldAttachments.putObject("items").put("type", "string");
+        historyParams.put("additionalProperties", false);
+
         // generate_images
         ObjectNode generate = tools.addObject();
         generate.put("type", "function");
@@ -2784,10 +3052,32 @@ public class AgentService {
      * 向 sink 推一条 SSE 事件(单行 JSON);失败仅告警,不中断编排。
      */
     private void emit(Sinks.Many<String> sink, AgentSseEvent event) {
+        ActiveRun run = sinkRuns.get(sink);
+        if (run != null && run.persisted != null && chatRunService != null) {
+            event.setRunId(run.persisted.getRequestId());
+            event.setRequestId(run.persisted.getRequestId());
+            chatRunService.observe(run.persisted, event);
+        }
         Sinks.EmitResult emitResult = sink.tryEmitNext(event.toJsonLine());
         if (emitResult.isFailure()) {
             log.warn("SSE 事件下发失败: type={}, result={}", event.getType(), emitResult);
         }
+    }
+
+    private String submitSelectedImageBatch(Long userId, Long conversationId, Long sourceMessageId,
+                                            List<GenerateImageItem> items, String aspectRatio,
+                                            List<String> images, ToolExecutionState state) {
+        if (state.imageModelId == null && !StringUtils.hasText(state.requestId)) {
+            return generationTaskService.submitImageBatch(userId, conversationId, sourceMessageId,
+                    items, null, aspectRatio, images);
+        }
+        String requestId = null;
+        if (StringUtils.hasText(state.requestId)) {
+            requestId = UUID.nameUUIDFromBytes((state.requestId + ":" + state.toolCallId)
+                    .getBytes(StandardCharsets.UTF_8)).toString();
+        }
+        return generationTaskService.submitImageBatch(userId, conversationId, sourceMessageId,
+                items, null, aspectRatio, images, state.imageModelId, requestId);
     }
 
     // ===== 内部累积结构 =====
@@ -2796,8 +3086,13 @@ public class AgentService {
     private static final class ActiveRun {
         private final Long userId;
         private final AtomicBoolean cancelled = new AtomicBoolean(false);
+        private final AtomicBoolean cleaned = new AtomicBoolean(false);
         private boolean interruptible = true;
+        private boolean started;
+        private Runnable onQueuedCancellation;
         private volatile Disposable worker;
+        private ChatRun persisted;
+        private SysAiModel chatModel;
 
         private ActiveRun(Long userId) {
             this.userId = userId;
@@ -2820,6 +3115,13 @@ public class AgentService {
             if (current != null) {
                 current.dispose();
             }
+            if (!started && onQueuedCancellation != null) onQueuedCancellation.run();
+            return true;
+        }
+
+        private synchronized boolean beginExecution() {
+            if (cancelled.get()) return false;
+            started = true;
             return true;
         }
 
@@ -2875,6 +3177,11 @@ public class AgentService {
 
     /** 本轮工具状态：出图与澄清互斥，参考表达错误只在提交前有限修正。 */
     private static class ToolExecutionState {
+        ReferenceContext selectedHistory;
+        boolean historyPending;
+        Long imageModelId;
+        String requestId;
+        String toolCallId;
         private int planCorrections;
         boolean submitted;
         boolean clarificationRequested;

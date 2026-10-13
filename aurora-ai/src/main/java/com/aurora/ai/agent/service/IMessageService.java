@@ -31,6 +31,8 @@ public interface IMessageService extends IService<Message> {
     Message saveUserMessage(Long conversationId, Long userId, String content, String media,
                             List<MessageAttachmentDraft> attachments);
 
+    void appendUserAttachments(Long userId, Long messageId, String media, List<MessageAttachmentDraft> attachments);
+
     /**
      * 查询会话全部消息,按 create_time、id 正序。
      *

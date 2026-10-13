@@ -128,14 +128,19 @@ export function agentChatStream({ endpoint = '/api/mobile/agent/chat/stream', da
 		header['Authorization'] = `Bearer ${token}`
 	}
 
-	const handlers = { onMeta, onQueue, onThinking, onText, onTool, onClarification, onResult, onDone, onError }
+	let settled = false
+	const failOnce = (event) => { if (settled) return; settled = true; onError && onError(event) }
+	const handlers = { onMeta, onQueue, onThinking, onText, onTool, onClarification, onResult,
+		onDone: (event) => { if (settled) return; settled = true; onDone && onDone(event) },
+		onError: failOnce, isSettled: () => settled,
+	}
 
 	// #ifndef H5
-	return startMpStream({ url, header, data, handlers, onError })
+	return startMpStream({ url, header, data, handlers, onError: failOnce })
 	// #endif
 
 	// #ifdef H5
-	return startH5Stream({ url, header, data, handlers, onError })
+	return startH5Stream({ url, header, data, handlers, onError: failOnce })
 	// #endif
 }
 
@@ -157,6 +162,13 @@ function startMpStream({ url, header, data, handlers, onError }) {
 		timeout: streamTimeout,
 		header,
 		data,
+		success: (response) => {
+			if (aborted || handlers.isSettled()) return
+			const body = response.data && typeof response.data === 'object' ? response.data : null
+			const rejected = response.statusCode >= 400 || (body?.code != null && body.code !== 200)
+			onError && onError({ type: rejected ? 'error' : undefined,
+				message: body?.msg || body?.message || (rejected ? `请求失败(${response.statusCode})` : '连接结束，正在恢复任务状态') })
+		},
 		fail: (err) => {
 			if (aborted) return
 			onError && onError({ message: (err && err.errMsg) || '网络异常' })
@@ -253,7 +265,7 @@ function startH5Stream({ url, header, data, handlers, onError }) {
 	})
 		.then((res) => {
 			if (!res.ok || !res.body) {
-				onError && onError({ message: `请求失败(${res.status})` })
+				onError && onError({ type: 'error', message: `请求失败(${res.status})` })
 				return
 			}
 			const reader = res.body.getReader()
@@ -265,6 +277,7 @@ function startH5Stream({ url, header, data, handlers, onError }) {
 						// 冲洗 decoder 残留
 						const tail = decoder.decode()
 						if (tail) feed(tail)
+						if (!handlers.isSettled()) onError && onError({ message: '连接结束，正在恢复任务状态' })
 						return
 					}
 					const text = decoder.decode(value, { stream: true })

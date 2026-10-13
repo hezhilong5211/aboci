@@ -98,6 +98,11 @@
 									@new-task="startNewTaskFromClarification"
 								/>
 
+								<view v-if="msg.rechargeRequired && msg.rechargeRequestId === conversationStore.currentSession.requestId" class="recharge-recovery">
+									<text class="recharge-recovery-hint">{{ msg.sourceMessageId != null ? '充值到账后可继续这条任务' : '充值后请重新发送需求' }}</text>
+									<text class="recharge-recovery-action" @tap="goRecharge">去充值</text>
+								</view>
+
 								<!-- 结果分段卡 -->
 									<ResultCard
 										v-if="msg.result"
@@ -170,6 +175,10 @@
 				</view>
 			</scroll-view>
 
+			<view class="chat-models" v-if="userStore.isLoggedIn">
+				<ModelSelector label="对话" :models="chatModels" :model-value="conversationStore.currentSession.modelId" :disabled="interactionLocked" :loading="modelsLoading" @update:model-value="selectChatModel" />
+				<ModelSelector label="出图" :models="imageModels" :model-value="conversationStore.currentSession.imageModelId" :disabled="interactionLocked" :loading="modelsLoading" @update:model-value="selectImageModel" />
+			</view>
 			<!-- 编辑器:上传/文字/发送三段固定分区,文字增高不改变按钮位置与可用宽度 -->
 			<view
 				class="input-row"
@@ -275,10 +284,11 @@ import {
 	resumeChatStream,
 	createConversation,
 	getGeneration,
-	getMessageGenerations,
 	listConversations,
 	getMessagePage,
 	getPendingClarification,
+	getConversationRun,
+	getAvailableModels,
 	getSkills,
 	createPromptFavorite,
 	retryFailedImage,
@@ -291,6 +301,7 @@ import ResultCard from './components/ResultCard.vue'
 import ClarificationCard from './components/ClarificationCard.vue'
 import InputPlusPopup from './components/InputPlusPopup.vue'
 import HistoryOverlay from './components/HistoryOverlay.vue'
+import ModelSelector from '@/components/common/ModelSelector.vue'
 import ImageOrderEditor from '@/components/common/ImageOrderEditor.vue'
 import { renderMarkdown } from '@/utils/markdown.js'
 
@@ -324,7 +335,10 @@ const componentInstance = getCurrentInstance()
 // ====== 直接消费 store 状态 ======
 const messages = computed(() => conversationStore.messages)
 const streaming = computed(() => conversationStore.streaming)
-const recoveringConversation = ref(false)
+const recoveringConversation = computed({
+	get: () => conversationStore.currentSession.recovering,
+	set: (value) => { conversationStore.currentSession.recovering = value },
+})
 const preparingConversation = ref(false)
 const interactionLocked = computed(
 	() => streaming.value || recoveringConversation.value || preparingConversation.value
@@ -333,6 +347,34 @@ const showStopButton = computed(
 	() => streaming.value || (recoveringConversation.value && conversationStore.activeMessageId != null)
 )
 const hasMessages = computed(() => messages.value.length > 0)
+
+const chatModels = ref([]), imageModels = ref([]), modelsLoading = ref(false)
+let modelsLoadVersion = 0
+function ensureModelSelection() {
+	if (modelsLoading.value || (!chatModels.value.length && !imageModels.value.length)) return
+	const session = conversationStore.currentSession
+	const choose = (list, id) => list.find((m) => sameId(m.modelId, id))?.modelId || list.find((m) => m.isDefault === 1 || m.isDefault === true)?.modelId || list[0]?.modelId || null
+	conversationStore.setModels(choose(chatModels.value, session.modelId), choose(imageModels.value, session.imageModelId))
+}
+function selectChatModel(id) { conversationStore.setModels(id, conversationStore.currentSession.imageModelId) }
+function selectImageModel(id) { conversationStore.setModels(conversationStore.currentSession.modelId, id) }
+async function loadModels() {
+	if (!userStore.isLoggedIn) return
+	const epoch = sessionEpoch, version = ++modelsLoadVersion
+	modelsLoading.value = true
+	try {
+		const data = await getAvailableModels()
+		if (disposed || epoch !== sessionEpoch || version !== modelsLoadVersion) return
+		chatModels.value = data?.chatModels || []
+		imageModels.value = data?.imageModels || []
+	} catch { /* Leave existing selection intact; the server validates availability. */ }
+	finally {
+		if (!disposed && epoch === sessionEpoch && version === modelsLoadVersion) {
+			modelsLoading.value = false
+			ensureModelSelection()
+		}
+	}
+}
 
 // ====== 顶部留白 / 底部定位 ======
 // 顶部导航由首页页面壳负责，消息区只保留轻量呼吸空间。
@@ -745,7 +787,10 @@ const pendingImages = ref([])
 const referenceUploading = ref(false)
 let referenceUploadVersion = 0
 // 后端精确绑定的待回答澄清；scopeId 只由客户端原样回传，不展示给用户。
-const pendingClarification = ref(null)
+const pendingClarification = computed({
+	get: () => conversationStore.currentSession.pendingClarification,
+	set: (value) => { conversationStore.currentSession.pendingClarification = value },
+})
 const selectedClarificationOptionId = ref('')
 const orderEditorVisible = ref(false)
 const pendingImageUrls = computed(() => pendingImages.value.map((img) => fullUrl(img)))
@@ -867,6 +912,10 @@ watch(
 		() => pendingClarification.value,
 		() => pendingImages.value.length,
 		skillActive,
+		() => chatModels.value.length,
+		() => imageModels.value.length,
+		() => conversationStore.currentSession.modelId,
+		() => conversationStore.currentSession.imageModelId,
 	],
 	scheduleDockMeasure,
 	{ immediate: true }
@@ -877,7 +926,10 @@ const plusVisible = ref(false)
 
 // ====== 历史浮层 ======
 const historyVisible = ref(false)
-const conversations = ref([])
+const conversationRecords = ref([])
+const conversations = computed(() => conversationRecords.value.map((item) => ({ ...item,
+	runStatus: conversationStore.sessions[String(item.conversationId)]?.status || item.runStatus,
+})))
 const historyLoading = ref(false)
 const historySwitchingId = ref(null)
 const newConversationSwitching = ref(false)
@@ -891,16 +943,16 @@ let historyMarkdownLoaded = 0
 let historyMarkdownResolve = null
 let historyMarkdownTimer = null
 
-// 当前流式请求对象(保存以便 abort)
-let currentStream = null
-// 当前流对应的用户消息 id，由 meta 事件返回，供显式停止后端编排
-let currentMessageId = conversationStore.activeMessageId || null
+// Each callback captures its session and request. Navigation never owns a run.
+const streams = new Map()
+const syncTimers = new Map()
+const syncVersions = new Map()
+let disposed = false
+let sessionEpoch = 0
 // 出图轮询定时器集合(用于卸载时清理)
 const pollTimers = new Set()
-const pollingTaskIds = new Set()
+const pollingTasks = new Map()
 // 断线恢复轮询：服务端完成后会落 assistant 消息，客户端据此恢复最终对话。
-let conversationSyncTimer = null
-let conversationSyncVersion = 0
 const CONVERSATION_SYNC_INTERVAL = 3000
 
 // ====== 工具方法 ======
@@ -973,12 +1025,18 @@ function closeHistory() {
 }
 
 async function loadConversations() {
+	const epoch = sessionEpoch
 	historyLoading.value = true
 	try {
 		const res = await listConversations(1, 30)
-		conversations.value = (res && res.records) || []
+			if (epoch !== sessionEpoch || disposed) return
+		conversationRecords.value = (res && res.records) || []
+			conversationRecords.value.forEach((item) => {
+				const session = conversationStore.sessions[String(item.conversationId)]
+				if (session && !streams.has(String(item.conversationId))) session.status = item.runStatus || ''
+			})
 	} catch (e) {
-		conversations.value = []
+		conversationRecords.value = []
 	} finally {
 		historyLoading.value = false
 	}
@@ -1027,38 +1085,45 @@ async function revealPreparedConversation(version) {
 	historyClosing.value = false
 }
 
-// 历史:新建对话。目标空态先在浮层下面稳定，再揭示页面。
+// Preserve each conversation's unsent inputs as well as its live output.
+function saveInputDraft() {
+	conversationStore.currentSession.draft = { text: inputText.value, images: pendingImages.value.slice(),
+		skill: activeSkill.value, option: selectedClarificationOptionId.value }
+	cancelReferenceUpload()
+}
+function restoreInputDraft() {
+	const draft = conversationStore.currentSession.draft || {}
+	setInputText(draft.text || '')
+	pendingImages.value = draft.images || []
+	activeSkill.value = draft.skill || ''
+	selectedClarificationOptionId.value = draft.option || ''
+	orderEditorVisible.value = false
+	ensureModelSelection()
+}
 async function onHistoryNew() {
+	if (preparingConversation.value) return
 	const version = ++historySwitchVersion
 	newConversationSwitching.value = true
-	clearConversationSync()
-	clearResultPolling()
-	recoveringConversation.value = false
-	currentMessageId = null
+	saveInputDraft()
 	conversationStore.reset()
 	historyCursor.value = null
 	historyHasMore.value = false
 	historyOlderLoading.value = false
-	resetInputState()
+	restoreInputDraft()
 	scrollCommandVersion += 1
 	scrollIntoView.value = ''
 	commandScrollTop(0, false)
 	await nextTick()
-	await delay(40)
 	await revealPreparedConversation(version)
 	if (version === historySwitchVersion) newConversationSwitching.value = false
 }
-
-// 历史:载入某会话
 async function onHistoryPick(item) {
+	if (preparingConversation.value) return
 	const version = ++historySwitchVersion
 	historySwitchingId.value = item.conversationId
-	const loaded = await loadConversation(item.conversationId, true, true)
-	if (!loaded || version !== historySwitchVersion) {
-		if (version === historySwitchVersion) historySwitchingId.value = null
-		return
-	}
-	await revealPreparedConversation(version)
+	saveInputDraft()
+	const loaded = await loadConversation(item.conversationId, true, true, version)
+	if (loaded && version === historySwitchVersion) await revealPreparedConversation(version)
 	if (version === historySwitchVersion) historySwitchingId.value = null
 }
 
@@ -1066,45 +1131,25 @@ function sameId(left, right) {
 	return left != null && right != null && String(left) === String(right)
 }
 
-function clearConversationSync() {
-	conversationSyncVersion += 1
-	if (conversationSyncTimer) clearTimeout(conversationSyncTimer)
-	conversationSyncTimer = null
-}
-
-function lastVisibleRole(list) {
-	if (!Array.isArray(list)) return ''
-	for (let i = list.length - 1; i >= 0; i -= 1) {
-		if (list[i] && (list[i].role === 'user' || list[i].role === 'assistant')) {
-			return list[i].role
-		}
+function clearConversationSync(conversationId) {
+	if (conversationId == null) {
+		for (const key of syncTimers.keys()) clearConversationSync(key)
+		return
 	}
-	return ''
+	const key = String(conversationId)
+	syncVersions.set(key, (syncVersions.get(key) || 0) + 1)
+	clearTimeout(syncTimers.get(key))
+	syncTimers.delete(key)
 }
-
-function lastVisibleMessage(list, role) {
-	if (!Array.isArray(list)) return null
-	for (let i = list.length - 1; i >= 0; i -= 1) {
-		if (list[i] && list[i].role === role) return list[i]
-	}
-	return null
-}
-
+function isCurrentSession(id) { return sameId(conversationStore.conversationId, id) }
+const ACTIVE_RUN_STATES = new Set(['QUEUED', 'RUNNING', 'GENERATING'])
 function applyConversationSnapshot(conversationId, list, pending, pageInfo = null) {
-	const loaded = normalizeHistoryMessages(list)
-	clearResultPolling()
-	conversationStore.replaceConversationSnapshot(conversationId, loaded)
-	conversationStore.setStreaming(false)
-	if (pageInfo) {
-		historyCursor.value = pageInfo.nextCursor == null ? null : pageInfo.nextCursor
-		historyHasMore.value = !!pageInfo.hasMore
-	}
-	// 必须轮询 store 内的响应式对象；直接改 loaded 原对象不会触发界面更新。
-	conversationStore.messages.forEach((m) => startResultPolling(m.result))
-	resetInputState()
-	pendingClarification.value = pending && pending.scopeId ? pending : null
-	measureUserMessages()
-	return loaded
+	const session = conversationStore.getSession(conversationId)
+	session.messages = normalizeHistoryMessages(list)
+	session.pendingClarification = pending && pending.scopeId ? pending : null
+	if (pageInfo) { session.nextCursor = pageInfo.nextCursor; session.hasMore = !!pageInfo.hasMore }
+	session.messages.forEach((message) => startResultPolling(message.result))
+	return session.messages
 }
 
 function appendRecoveryPlaceholder(sourceMessageId) {
@@ -1137,113 +1182,150 @@ function hasGenerationTasks(ai) {
 function applyGenerationTaskSnapshot(result, task) {
 	if (!result || !task || !task.taskId) return
 	const status = task.status || 'RUNNING'
+	const urls = Array.isArray(task.resultUrls) ? task.resultUrls : safeParse(task.resultUrls) || []
+	const previews = Array.isArray(task.previewUrls) ? task.previewUrls : safeParse(task.previewUrls) || []
 	if (status === 'SUCCEEDED' || status === 'RUNNING') {
-		markTaskImages(result, task.taskId, status, task.resultUrls || [], task.previewUrls || [])
+		markTaskImages(result, task.taskId, status, urls, previews)
 	} else if (status === 'FAILED' || status === 'CANCELLED') {
-		markTaskImages(result, task.taskId, 'FAILED', null)
+		markTaskImages(result, task.taskId, 'FAILED', urls, previews)
 	} else {
 		markTaskImages(result, task.taskId, status, null)
 	}
 }
 
-async function restoreGenerationTasks(conversationId, sourceMessageId, ai) {
-	if (!ai || sourceMessageId == null || hasGenerationTasks(ai)) return false
-	try {
-		const tasks = await getMessageGenerations(conversationId, sourceMessageId, { showError: false })
-		if (!Array.isArray(tasks) || !tasks.length) return false
-		const images = []
-		tasks.forEach((task) => {
-			const count = Math.max(1, Number(task && task.n) || 1)
-			for (let seq = 1; seq <= count; seq += 1) {
-				images.push({ taskId: task.taskId, seq })
-			}
-		})
-		ai.result = mergeResultData(ai.result, { images })
-		tasks.forEach((task) => applyGenerationTaskSnapshot(ai.result, task))
-		startResultPolling(ai.result)
-		ai.queueMessage = tasks.every((task) =>
-			['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task && task.status)
-		)
-			? '图片任务已完成，正在整理回复'
-			: '图片生成任务正在后台处理'
-			followLatestIfNearBottom()
-		return true
-	} catch (e) {
-		return false
+function applyRunSnapshot(session, run) {
+	if (!run) return
+	const running = ACTIVE_RUN_STATES.has(run.status)
+	const rechargeRequired = run.status === 'WAITING_RECHARGE'
+		|| (run.status === 'WAITING_CONFIRMATION' && run.clarification?.key === 'INSUFFICIENT_BALANCE')
+	session.status = run.status
+	session.requestId = run.requestId || run.runId
+	session.activeMessageId = running ? (run.messageId || run.requestId || run.runId) : null
+	session.recovering = running
+	session.streaming = false
+	if (run.modelId != null && session.modelId == null) session.modelId = run.modelId
+	if (run.imageModelId != null && session.imageModelId == null) session.imageModelId = run.imageModelId
+	if (run.clarification) session.pendingClarification = run.clarification
+	if (rechargeRequired) {
+		if (run.messageId != null) {
+			const previous = sameId(session.pendingResumeTask?.sourceMessageId, run.messageId) ? session.pendingResumeTask : null
+			conversationStore.setPendingResumeTask({
+				...previous, conversationId: session.conversationId, sourceMessageId: run.messageId,
+				modelId: run.modelId, imageModelId: run.imageModelId,
+				continuationMode: run.clarification?.scopeId || run.assistantMessageId != null ? 'confirmation' : 'resume',
+				clarificationScopeId: run.clarification?.scopeId || previous?.clarificationScopeId,
+				clarificationOptionId: run.clarification?.key === 'INSUFFICIENT_BALANCE' ? 'generate_requested' : previous?.clarificationOptionId,
+				ready: previous?.ready === true,
+			}, session.conversationId)
+		} else conversationStore.clearPendingResumeTask(session.conversationId)
+	} else if ((running || ['COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED'].includes(run.status))
+		&& sameId(session.pendingResumeTask?.sourceMessageId, run.messageId)) {
+		// Another device or a previous reconnect may have already resumed this message.
+		conversationStore.clearPendingResumeTask(session.conversationId)
 	}
+	let ai = session.messages.find((message) => message.renderKey === `run-${run.runId}` || message.renderKey === `local-assistant-${run.requestId}` || (message.role === 'assistant' && (sameId(message.sourceMessageId, run.messageId) || sameId(message.id, run.assistantMessageId))))
+	if (!ai && (running || rechargeRequired || run.text || run.thinking || run.result || run.errorMessage)) {
+		ai = { renderKey: `run-${run.runId}`, role: 'assistant', text: '', thinking: '', tools: [], result: null }
+		session.messages.push(ai)
+		ai = session.messages[session.messages.length - 1]
+	}
+	if (!ai) return
+	ai.sourceMessageId = run.messageId
+	ai.text = run.text || (rechargeRequired ? run.errorMessage || '豆子余额不足，请充值后继续' :
+		run.status === 'FAILED' || run.status === 'INTERRUPTED' ? run.errorMessage || '任务未完成，请重试' : '')
+	ai.rechargeRequired = rechargeRequired
+	ai.rechargeRequestId = run.requestId || run.runId
+	ai.thinking = run.thinking || ''
+	ai.queueMessage = running ? (run.status === 'QUEUED' ? '排队中，请稍候' : '任务正在后台处理') : ''
+	ai.clarification = run.clarification || null
+	ai.stopped = run.status === 'CANCELLED'
+	if (run.result) ai.result = mergeResultData(ai.result, run.result)
+	for (const task of run.generationTasks || []) {
+		if (!ai.result) ai.result = { images: [] }
+		if (!Array.isArray(ai.result.images)) ai.result.images = []
+		for (let seq = 1; seq <= Math.max(1, Number(task.n) || 1); seq++) {
+			if (!ai.result.images.some((img) => img.taskId === task.taskId && img.seq === seq)) ai.result.images.push({ taskId: task.taskId, seq })
+		}
+		applyGenerationTaskSnapshot(ai.result, task)
+	}
+	startResultPolling(ai.result)
 }
-
-function startConversationSync(conversationId, recoveryAi, sourceMessageId) {
-	clearConversationSync()
-	const version = conversationSyncVersion
+function startConversationSync(conversationId) {
+	if (conversationId == null || disposed) return
+	clearConversationSync(conversationId)
+	const key = String(conversationId), version = syncVersions.get(key)
+	const expectedRequestId = conversationStore.getSession(conversationId).requestId
+	let missingRunCount = 0
 	const tick = async () => {
+		if (disposed || syncVersions.get(key) !== version || streams.has(key)) return
 		try {
-			const page = await getMessagePage(conversationId, null, 30, { showError: false })
-			if (version !== conversationSyncVersion) return
-			const list = (page && page.records) || []
-			const lastRole = lastVisibleRole(list)
-			if (lastRole === 'assistant') {
-				const pending = await getPendingClarification(conversationId, { showError: false }).catch(() => null)
-				if (version !== conversationSyncVersion) return
-				applyConversationSnapshot(conversationId, list, pending, page)
-				scrollToBottom(false)
-				recoveringConversation.value = false
-				currentMessageId = null
-				conversationStore.setActiveMessageId(null)
-				clearConversationSync()
-				refreshBalance()
+			const run = await getConversationRun(conversationId, { showError: false })
+			if (disposed || syncVersions.get(key) !== version || streams.has(key)) return
+			const session = conversationStore.getSession(conversationId)
+			if (expectedRequestId && (!run || String(run.requestId || run.runId) !== String(expectedRequestId))) {
+				missingRunCount += 1
+				if (missingRunCount < 3) { syncTimers.set(key, setTimeout(tick, CONVERSATION_SYNC_INTERVAL)); return }
+				session.recovering = false
+				session.activeMessageId = null
+				session.status = 'FAILED'
+				const last = session.messages[session.messages.length - 1]
+				if (last?.role === 'assistant') { last.queueMessage = ''; if (!last.text) last.text = session.transportError || '未查询到本次任务，请重新发送' }
+				conversationStore.persist()
+				clearConversationSync(conversationId)
 				return
 			}
-			if (lastRole === 'user') {
-				recoveringConversation.value = true
-				const latestUser = lastVisibleMessage(list, 'user')
-				const recoveryMessageId = sourceMessageId || (latestUser && latestUser.id)
-				await restoreGenerationTasks(conversationId, recoveryMessageId, recoveryAi)
+			applyRunSnapshot(session, run)
+			conversationStore.persist()
+			if (!run || !ACTIVE_RUN_STATES.has(run.status)) {
+				const page = await getMessagePage(conversationId, null, 30, { showError: false })
+				if (disposed || syncVersions.get(key) !== version || streams.has(key)) return
+				applyConversationSnapshot(conversationId, page?.records || [], run?.clarification, page)
+				// Preserve interrupted/failed run diagnostics if no assistant record exists.
+				if (run) applyRunSnapshot(session, run)
+				session.recovering = false
+				session.activeMessageId = null
+				conversationStore.persist()
+				clearConversationSync(conversationId)
+				refreshBalance()
+				if (historyVisible.value) loadConversations()
+				return
 			}
-		} catch (e) {
-			// 网络短暂失败时继续查询，避免把后台任务误判为失败。
-		}
-		if (version !== conversationSyncVersion) return
-		conversationSyncTimer = setTimeout(tick, CONVERSATION_SYNC_INTERVAL)
+		} catch { /* A transient network error must not discard a running task. */ }
+		if (!disposed && syncVersions.get(key) === version) syncTimers.set(key, setTimeout(tick, CONVERSATION_SYNC_INTERVAL))
 	}
-	conversationSyncTimer = setTimeout(tick, CONVERSATION_SYNC_INTERVAL)
+	syncTimers.set(key, setTimeout(tick, CONVERSATION_SYNC_INTERVAL))
 }
-
-async function loadConversation(conversationId, showError = false, settleForReveal = false) {
-	const trackedMessageId = sameId(conversationStore.conversationId, conversationId)
-		? conversationStore.activeMessageId
-		: null
-	clearConversationSync()
+async function loadConversation(conversationId, showError = false, settleForReveal = false, switchVersion = historySwitchVersion) {
+	const session = conversationStore.getSession(conversationId)
+	const initialRequestId = session.requestId
+	const epoch = sessionEpoch
+	const ownsSnapshot = () => !disposed && epoch === sessionEpoch && switchVersion === historySwitchVersion
+		&& conversationStore.getSession(conversationId) === session
+		&& session.requestId === initialRequestId && !streams.has(String(conversationId))
 	try {
-		const [page, pending] = await Promise.all([
-			getMessagePage(conversationId, null, 30, { showError: false }),
-			getPendingClarification(conversationId, { showError: false }).catch(() => null),
-		])
-		const list = (page && page.records) || []
-		const loaded = applyConversationSnapshot(conversationId, list, pending, page)
-		const markdownReady = settleForReveal ? waitForHistoryMarkdown(loaded) : Promise.resolve()
+		if (!streams.has(String(conversationId))) {
+			const [page, pending, run] = await Promise.all([
+				getMessagePage(conversationId, null, 30, { showError: false }),
+				getPendingClarification(conversationId, { showError: false }).catch(() => null),
+				getConversationRun(conversationId, { showError: false }),
+			])
+			// A send can start while the history/run requests are awaiting the network.
+			// Never replace the reactive message objects owned by that newer stream.
+			if (!ownsSnapshot()) return false
+			applyConversationSnapshot(conversationId, page?.records || [], pending, page)
+			if (run) applyRunSnapshot(session, run)
+			else { session.recovering = false; session.activeMessageId = null; session.status = '' }
+			if (run && ACTIVE_RUN_STATES.has(run.status)) startConversationSync(conversationId)
+		}
+		if (switchVersion !== historySwitchVersion) return false
+		conversationStore.setConversationId(conversationId)
+		historyCursor.value = session.nextCursor
+		historyHasMore.value = session.hasMore
+		restoreInputDraft()
+		if (settleForReveal) await waitForHistoryMarkdown(session.messages)
 		scrollToBottom(false)
-		if (settleForReveal) {
-			await markdownReady
-			scrollToBottom(false)
-			await delay(40)
-		}
-		if (lastVisibleRole(list) !== 'assistant' && trackedMessageId != null) {
-			const latestUser = lastVisibleMessage(list, 'user')
-			const sourceMessageId = latestUser && latestUser.id
-			recoveringConversation.value = true
-			currentMessageId = trackedMessageId
-			conversationStore.setActiveMessageId(trackedMessageId)
-			const recoveryAi = appendRecoveryPlaceholder(sourceMessageId)
-			await restoreGenerationTasks(conversationId, sourceMessageId, recoveryAi)
-			startConversationSync(conversationId, recoveryAi, sourceMessageId)
-		} else {
-			recoveringConversation.value = false
-			currentMessageId = null
-			conversationStore.setActiveMessageId(null)
-		}
 		return true
-	} catch (e) {
+	} catch (error) {
 		if (showError) uni.showToast({ title: '加载会话失败', icon: 'none' })
 		return false
 	}
@@ -1560,17 +1642,6 @@ function applyPendingImageOrder(order) {
 	orderEditorVisible.value = false
 }
 
-// 重置输入相关态(新建/切会话时)
-function resetInputState() {
-	cancelReferenceUpload()
-	setInputText('')
-	pendingImages.value = []
-	pendingClarification.value = null
-	selectedClarificationOptionId.value = ''
-	orderEditorVisible.value = false
-	activeSkill.value = ''
-}
-
 function isActiveClarification(clarification) {
 	return !!(
 		clarification &&
@@ -1659,7 +1730,8 @@ async function handleSend() {
 	const clarificationScopeId = pendingClarification.value && pendingClarification.value.scopeId
 	const clarificationOptionId = selectedClarificationOptionId.value || undefined
 	const requestId = createRequestId()
-	currentMessageId = requestId
+	conversationStore.currentSession.requestId = requestId
+	conversationStore.currentSession.status = 'QUEUED'
 	conversationStore.setActiveMessageId(requestId)
 
 	// 1) push 用户消息
@@ -1705,168 +1777,128 @@ async function handleSend() {
 			requestId,
 			conversationId: conversationStore.conversationId,
 			message: text,
+			modelId: conversationStore.currentSession.modelId || undefined,
+			imageModelId: conversationStore.currentSession.imageModelId || undefined,
 			imageInputs: imageInputs.length ? imageInputs : undefined,
 			skill,
 			clarificationScopeId: clarificationScopeId || undefined,
 			clarificationOptionId,
 	}
-	currentStream = chatStream(streamPayload, createStreamHandlers(ai, streamPayload))
+	streams.set(String(streamPayload.conversationId), chatStream(streamPayload, createStreamHandlers(ai, streamPayload)))
 }
 
 function createStreamHandlers(ai, streamPayload) {
+	const id = streamPayload.conversationId
+	const session = conversationStore.getSession(id)
+	const epoch = sessionEpoch
+	const valid = () => !disposed && epoch === sessionEpoch && session.requestId === streamPayload.requestId
+	const follow = () => { if (isCurrentSession(id)) followLatestIfNearBottom() }
+	const guarded = (handler) => (event) => { if (valid()) handler(event) }
 	return {
-			onQueue: (e) => {
-				ai.queueMessage = (e && e.message) || '当前排队人数较多，请耐心等待'
-				followLatestIfNearBottom()
-			},
-			onMeta: (e) => {
-				ai.queueMessage = ''
-				if (e && e.conversationId != null) {
-					conversationStore.setConversationId(e.conversationId)
-				}
-				if (e && e.messageId != null) {
-					ai.sourceMessageId = e.messageId
-					currentMessageId = e.messageId
-					conversationStore.setActiveMessageId(e.messageId)
-				}
-			},
-			onThinking: (e) => {
-				ai.queueMessage = ''
-				ai.thinking += (e && e.content) || ''
-				followLatestIfNearBottom()
-			},
-			onText: (e) => {
-				ai.queueMessage = ''
-				ai.text += (e && e.content) || ''
-				followLatestIfNearBottom()
-			},
-			onTool: (e) => {
-				mergeTool(ai, e)
-				if (e && e.name === 'generate_images' && e.status === 'done' && e.taskId) {
-					ai.result = mergeResultData(ai.result, {
-						images: Array.from({ length: Number(e.n) || 1 }, (_, index) => ({
-							taskId: e.taskId,
-							seq: index + 1,
-						})),
-					})
-					startResultPolling(ai.result)
-				}
-				followLatestIfNearBottom()
-			},
-			onClarification: (e) => {
-				const clarification = e && e.clarification
-				if (!clarification || !clarification.scopeId) return
-				ai.clarification = clarification
-				pendingClarification.value = clarification
-				selectedClarificationOptionId.value = ''
-				followLatestIfNearBottom()
-			},
-			onResult: (e) => {
-				const data = (e && e.data) || {}
-				ai.result = mergeResultData(ai.result, data)
-				// 对结果中的图片任务启动轮询
+		onQueue: guarded((event) => { ai.queueMessage = event?.message || '排队中，请稍候'; session.status = 'QUEUED'; follow() }),
+		onMeta: guarded((event) => {
+			ai.queueMessage = ''; session.status = 'RUNNING'
+			if (event?.messageId != null) { ai.sourceMessageId = event.messageId; conversationStore.setActiveMessageId(event.messageId, id) }
+		}),
+		onThinking: guarded((event) => { ai.queueMessage = ''; ai.thinking += event?.content || ''; follow() }),
+		onText: guarded((event) => { ai.queueMessage = ''; ai.text += event?.content || ''; follow() }),
+		onTool: guarded((event) => {
+			mergeTool(ai, event)
+			if (event?.name === 'generate_images' && event.status === 'done' && event.taskId) {
+				ai.result = mergeResultData(ai.result, { images: Array.from({ length: Number(event.n) || 1 }, (_, index) => ({ taskId: event.taskId, seq: index + 1 })) })
 				startResultPolling(ai.result)
-				followLatestIfNearBottom()
-			},
-			onDone: () => {
-				ai.queueMessage = ''
-				const pending = conversationStore.pendingResumeTask
-				if (pending && sameId(pending.sourceMessageId, ai.sourceMessageId)) {
-					conversationStore.clearPendingResumeTask()
-				}
-				finishStream()
-				refreshBalance()
-			},
-			onError: (e) => {
-				ai.queueMessage = ''
-				const rechargeRequired =
-					e && e.errorCode === 'INSUFFICIENT_BEANS' && e.action === 'RECHARGE'
-				if (rechargeRequired && ai.sourceMessageId != null) {
-					conversationStore.setPendingResumeTask({
-						conversationId: conversationStore.conversationId,
-						sourceMessageId: ai.sourceMessageId,
-						skill: streamPayload.skill,
-						clarificationScopeId: streamPayload.clarificationScopeId,
-						clarificationOptionId: streamPayload.clarificationOptionId,
-						ready: false,
-					})
-				}
-				if (
-					(!e || e.type !== 'error' || (hasGenerationTasks(ai) && !rechargeRequired)) &&
-					conversationStore.conversationId != null &&
-					conversationStore.activeMessageId != null
-				) {
-					conversationStore.setStreaming(false)
-					recoveringConversation.value = true
-					currentStream = null
-					ai.queueMessage = hasGenerationTasks(ai)
-						? '图片生成中，请稍候'
-						: '任务正在后台处理中'
-					startConversationSync(
-						conversationStore.conversationId,
-						ai,
-						ai.sourceMessageId
-					)
-					return
-				}
-				if (!rechargeRequired && streamPayload.sourceMessageId != null) {
-					conversationStore.clearPendingResumeTask()
-				}
-				finishStream()
-				const msg = (e && e.message) || '生成失败,请重试'
-				if (rechargeRequired) {
-					uni.showModal({
-						title: '豆子余额不足',
-						content: msg,
-						confirmText: '去充值',
-						success: (res) => {
-							if (res.confirm) goRecharge()
-						},
-					})
-				}
-				// 若 AI 块尚无任何内容,降级为错误文本气泡
-				if (!ai.text && !ai.thinking && !ai.result && (!ai.tools || !ai.tools.length)) {
-					ai.text = '⚠️ ' + msg
-				} else if (!rechargeRequired) {
-					uni.showToast({ title: msg, icon: 'none' })
-				}
-			},
+			}
+			follow()
+		}),
+		onClarification: guarded((event) => {
+			if (!event?.clarification?.scopeId) return
+			ai.clarification = event.clarification; session.pendingClarification = event.clarification
+			if (isCurrentSession(id)) selectedClarificationOptionId.value = ''
+			follow()
+		}),
+		onResult: guarded((event) => { ai.result = mergeResultData(ai.result, event?.data || {}); startResultPolling(ai.result); follow() }),
+		onDone: guarded(() => {
+			ai.queueMessage = ''
+			if (sameId(session.pendingResumeTask?.sourceMessageId, ai.sourceMessageId)) conversationStore.clearPendingResumeTask(id)
+			finishStream(id, streamPayload.requestId)
+			// Server status includes image tasks still running after text completion.
+			session.recovering = true
+			startConversationSync(id)
+			refreshBalance()
+		}),
+		onError: guarded((event) => {
+			const recharge = event?.errorCode === 'INSUFFICIENT_BEANS' && event.action === 'RECHARGE'
+			if (recharge && ai.sourceMessageId != null) conversationStore.setPendingResumeTask({
+				conversationId: id, sourceMessageId: ai.sourceMessageId, modelId: streamPayload.modelId,
+				imageModelId: streamPayload.imageModelId, skill: streamPayload.skill,
+				clarificationScopeId: streamPayload.clarificationScopeId, clarificationOptionId: streamPayload.clarificationOptionId, ready: false,
+			}, id)
+			finishStream(id, streamPayload.requestId)
+			// An HTTP/proxy error does not prove that the server rejected the run.
+			session.transportError = event?.message || '连接异常，请重试'
+			ai.queueMessage = '正在核对后台任务状态'
+			session.recovering = true
+			startConversationSync(id)
+			if (recharge && isCurrentSession(id)) uni.showModal({ title: '豆子余额不足', content: event.message || '请充值后继续', confirmText: '去充值', success: (res) => { if (res.confirm) goRecharge() } })
+		}),
 	}
 }
 
 async function tryResumePendingTask() {
-	const pending = conversationStore.pendingResumeTask
+	let pending = conversationStore.pendingResumeTask
 	if (!pending || !pending.ready || interactionLocked.value) return
 	if (pending.conversationId == null || pending.sourceMessageId == null) {
 		conversationStore.clearPendingResumeTask()
 		return
 	}
 	const loaded = await loadConversation(pending.conversationId, true)
-	if (!loaded || interactionLocked.value) return
+	const restoredPending = conversationStore.pendingResumeTask
+	if (!loaded || interactionLocked.value || !restoredPending?.ready
+		|| !sameId(restoredPending.sourceMessageId, pending.sourceMessageId)) return
+	pending = restoredPending
 	const requestId = createRequestId()
-	let ai = conversationStore.messages[conversationStore.messages.length - 1]
-	if (!ai || ai.role !== 'assistant') ai = appendRecoveryPlaceholder(pending.sourceMessageId)
+	const confirmation = pending.continuationMode === 'confirmation' || !!pending.clarificationScopeId
+	const confirmationText = '充值已到账，请按原计划继续生成'
+	let ai
+	if (confirmation) {
+		// Answering a saved clarification needs a new user message to consume its scope.
+		// Keep the original prompt and budget card as history.
+		conversationStore.addMessage({ renderKey: `local-user-${requestId}`, role: 'user', content: confirmationText, images: [] })
+		conversationStore.addMessage({ renderKey: `local-assistant-${requestId}`, role: 'assistant', text: '', thinking: '', tools: [], result: null })
+		ai = conversationStore.messages[conversationStore.messages.length - 1]
+		conversationStore.currentSession.pendingClarification = null
+	} else {
+		ai = conversationStore.messages[conversationStore.messages.length - 1]
+		if (!ai || ai.role !== 'assistant') ai = appendRecoveryPlaceholder(pending.sourceMessageId)
+	}
 	ai.queueMessage = '充值已到账，正在继续原任务'
 	ai.thinking = ''
 	ai.text = ''
 	ai.tools = []
 	ai.result = null
 	ai.clarification = null
-	ai.sourceMessageId = pending.sourceMessageId
+	ai.sourceMessageId = confirmation ? null : pending.sourceMessageId
 	ai.recoveryPlaceholder = false
-	currentMessageId = requestId
+	conversationStore.currentSession.requestId = requestId
+	conversationStore.currentSession.status = 'QUEUED'
 	conversationStore.setActiveMessageId(requestId)
 	conversationStore.setStreaming(true)
 	const streamPayload = {
 		requestId,
 		conversationId: pending.conversationId,
-		sourceMessageId: pending.sourceMessageId,
+		modelId: pending.modelId || conversationStore.currentSession.modelId || undefined,
+		imageModelId: pending.imageModelId || conversationStore.currentSession.imageModelId || undefined,
 		skill: pending.skill,
 		clarificationScopeId: pending.clarificationScopeId,
 		clarificationOptionId: pending.clarificationOptionId,
 	}
+	if (confirmation) streamPayload.message = confirmationText
+	else streamPayload.sourceMessageId = pending.sourceMessageId
+	// A disconnect recovers this new run; it must not auto-submit the paid confirmation twice.
+	conversationStore.clearPendingResumeTask(pending.conversationId)
 	scrollToBottom()
-	currentStream = resumeChatStream(streamPayload, createStreamHandlers(ai, streamPayload))
+	const submitStream = confirmation ? chatStream : resumeChatStream
+	streams.set(String(streamPayload.conversationId), submitStream(streamPayload, createStreamHandlers(ai, streamPayload)))
 }
 
 // 合并工具帧:同名工具 running→done 就地更新,否则追加
@@ -1918,45 +1950,34 @@ function mergeResultData(current, data) {
 	if (incoming.tags.length) current.tags = incoming.tags
 	if (incoming.images.length) {
 		const previous = Array.isArray(current.images) ? current.images : []
-		current.images = incoming.images.map((img) => {
-			const exist = previous.find(
-				(item) => item.taskId === img.taskId && Number(item.seq) === Number(img.seq)
-			)
-			return exist || img
-		})
+		const additions = incoming.images.filter((img) => !previous.some(
+			(item) => item.taskId === img.taskId && Number(item.seq) === Number(img.seq)
+		))
+		current.images = previous.concat(additions)
 	}
 	return current
 }
 
-// 停止:中断流式
-function handleStop() {
-	clearConversationSync()
-	clearResultPolling()
-	recoveringConversation.value = false
-	const last = conversationStore.messages[conversationStore.messages.length - 1]
-	if (last && last.role === 'assistant') {
-		last.queueMessage = ''
-		last.result = null
-		last.stopped = true
-	}
-	const stoppingMessageId = currentMessageId || conversationStore.activeMessageId
-	if (stoppingMessageId != null) {
-		stopChat(stoppingMessageId).catch(() => {})
-	}
-	if (currentStream && typeof currentStream.abort === 'function') {
-		currentStream.abort()
-	}
-	finishStream()
+// Only an explicit stop targets the current session; other sessions continue.
+async function handleStop() {
+	const id = conversationStore.conversationId
+	const session = conversationStore.getSession(id)
+	const runId = session.requestId || session.activeMessageId
+	if (!runId) return
+	try {
+		await stopChat(runId)
+		streams.get(String(id))?.abort?.()
+		finishStream(id, session.requestId)
+		session.recovering = true
+		startConversationSync(id)
+	} catch { uni.showToast({ title: '停止失败，请重试', icon: 'none' }) }
 }
-
-// 结束流式态(统一收尾)
-function finishStream() {
-	clearConversationSync()
-	conversationStore.setStreaming(false)
-	recoveringConversation.value = false
-	currentStream = null
-	currentMessageId = null
-	conversationStore.setActiveMessageId(null)
+function finishStream(id, requestId) {
+	const session = conversationStore.getSession(id)
+	if (session.requestId !== requestId) return
+	session.streaming = false
+	streams.delete(String(id))
+	conversationStore.persist()
 }
 
 // 刷新余额(onDone / 出图完成后)
@@ -1980,42 +2001,49 @@ async function refreshBalance() {
 function startResultPolling(result) {
 	if (!result || !Array.isArray(result.images) || !result.images.length) return
 	// 按 taskId 去重轮询(一个 task 含多张,seq 对应 resultUrls 下标)
-	const taskIds = [...new Set(result.images.map((img) => img.taskId).filter(Boolean))]
+	const taskIds = [...new Set(result.images.filter((img) => !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(img.status)).map((img) => img.taskId).filter(Boolean))]
 	taskIds.forEach((taskId) => pollTask(taskId, result))
 }
 
 function clearResultPolling() {
 	pollTimers.forEach((timer) => clearTimeout(timer))
 	pollTimers.clear()
-	pollingTaskIds.clear()
+	pollingTasks.clear()
 }
 
 function pollTask(taskId, result) {
-	if (!taskId || pollingTaskIds.has(taskId)) return
-	pollingTaskIds.add(taskId)
+	if (!taskId || disposed) return
+	if (pollingTasks.has(taskId)) { pollingTasks.get(taskId).add(result); return }
+	const subscribers = new Set([result])
+	pollingTasks.set(taskId, subscribers)
+	const update = (...args) => subscribers.forEach((target) => markTaskImages(target, taskId, ...args))
 	const INTERVAL = 3000
 
 	const tick = async () => {
+		if (disposed || pollingTasks.get(taskId) !== subscribers) return
 		try {
 			const task = await getGeneration(taskId, { showError: false })
+			if (disposed || pollingTasks.get(taskId) !== subscribers) return
 			const status = task && task.status
 			if (status === 'SUCCEEDED') {
-				markTaskImages(result, taskId, 'SUCCEEDED', task.resultUrls || [], task.previewUrls || [])
-				pollingTaskIds.delete(taskId)
+				update('SUCCEEDED', task.resultUrls || [], task.previewUrls || [])
+				pollingTasks.delete(taskId)
 				refreshBalance()
 				return
 			}
 			if (status === 'RUNNING' && task.resultUrls) {
-				markTaskImages(result, taskId, 'RUNNING', task.resultUrls, task.previewUrls || [])
+				update('RUNNING', task.resultUrls, task.previewUrls || [])
 			}
 			if (status === 'FAILED' || status === 'CANCELLED') {
-				markTaskImages(result, taskId, 'FAILED', null)
-				pollingTaskIds.delete(taskId)
+				update('FAILED', task.resultUrls || [], task.previewUrls || [])
+				refreshBalance()
+				pollingTasks.delete(taskId)
 				return
 			}
 		} catch (e) {
 			// 单次查询失败,继续重试
 		}
+		if (disposed || pollingTasks.get(taskId) !== subscribers) return
 		const timer = setTimeout(() => {
 			pollTimers.delete(timer)
 			tick()
@@ -2157,7 +2185,7 @@ function markTaskImages(result, taskId, status, resultUrls, previewUrls = []) {
 	if (!result || !Array.isArray(result.images)) return
 	result.images.forEach((img) => {
 		if (img.taskId !== taskId) return
-		if ((status === 'SUCCEEDED' || status === 'RUNNING') && resultUrls) {
+		if ((status === 'SUCCEEDED' || status === 'RUNNING' || status === 'FAILED') && resultUrls) {
 			const url = resultUrls[(img.seq || 1) - 1]
 			if (url) {
 				img.status = 'SUCCEEDED'
@@ -2165,7 +2193,7 @@ function markTaskImages(result, taskId, status, resultUrls, previewUrls = []) {
 				img.fullUrl = fullUrl(url)
 				const preview = previewUrls[(img.seq || 1) - 1]
 				img.previewUrl = fullUrl(preview || url)
-			} else if (status === 'SUCCEEDED') {
+			} else if (status === 'SUCCEEDED' || status === 'FAILED') {
 				img.status = 'FAILED'
 			}
 		} else {
@@ -2188,7 +2216,23 @@ watch(
 	{ immediate: true }
 )
 
+watch(() => userStore.userInfo?.id || userStore.userInfo?.userId || '', () => {
+	if (!conversationStore.syncOwner()) return
+	sessionEpoch += 1
+	historySwitchVersion += 1
+	conversationRecords.value = []
+	streams.forEach((stream) => stream?.abort?.())
+	streams.clear()
+	clearConversationSync()
+	clearResultPolling()
+	chatModels.value = []; imageModels.value = []; modelsLoading.value = false
+	restoreInputDraft()
+	loadModels()
+})
+
 onMounted(async () => {
+	conversationStore.syncOwner()
+	loadModels()
 	uni.$on('agent-resume-ready', handleResumeReady)
 	scheduleInputMeasure()
 	scheduleDockMeasure()
@@ -2204,6 +2248,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+	saveInputDraft()
+	disposed = true
 	cancelReferenceUpload()
 	uni.$off('agent-resume-ready', handleResumeReady)
 	// 页面关闭只断开本地连接，不等同于用户点击停止；服务端任务继续执行。
@@ -2225,16 +2271,18 @@ onBeforeUnmount(() => {
 	clearKbCoalesce()
 	dockMotionVersion += 1
 	clearDockMotionTimers()
-	if (currentStream && typeof currentStream.abort === 'function') {
-		currentStream.abort()
-	}
-	conversationStore.setStreaming(false)
-	recoveringConversation.value = false
-	currentStream = null
+	streams.forEach((stream) => stream?.abort?.())
+	streams.clear()
+	Object.values(conversationStore.sessions).forEach((session) => { session.streaming = false })
+	conversationStore.persist()
 })
 </script>
 
 <style lang="scss" scoped>
+.recharge-recovery { display: flex; align-items: center; gap: 20rpx; margin-top: 18rpx; }
+.recharge-recovery-hint { font-size: 24rpx; color: #8792a5; }
+.recharge-recovery-action { font-size: 26rpx; color: #477ede; padding: 10rpx 20rpx; background: #eef4ff; border-radius: 24rpx; }
+
 .chat-content {
 	height: 100%;
 	background: #f6f7fb;

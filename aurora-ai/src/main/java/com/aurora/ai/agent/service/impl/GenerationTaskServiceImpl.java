@@ -14,7 +14,10 @@ import com.aurora.ai.agent.dto.WorkReferenceVO;
 import com.aurora.ai.agent.dto.WorkVO;
 import com.aurora.ai.agent.mapper.GenerationTaskMapper;
 import com.aurora.ai.agent.service.IGenerationTaskService;
+import com.aurora.ai.agent.service.MobileModelCatalogService;
 import com.aurora.ai.domain.SysAiModel;
+import com.aurora.ai.provider.LuxaiImageSize;
+import com.aurora.ai.provider.LuxaiImageClient;
 import com.aurora.ai.mapper.SysAiModelMapper;
 import com.aurora.common.core.exception.ServiceException;
 import com.aurora.framework.mq.TaskProducer;
@@ -27,9 +30,13 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.dao.DuplicateKeyException;
 
 import java.util.List;
 import java.util.ArrayList;
@@ -39,6 +46,7 @@ import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.Objects;
 import java.time.format.DateTimeFormatter;
 
 /**
@@ -47,6 +55,7 @@ import java.time.format.DateTimeFormatter;
  */
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper, GenerationTask>
         implements IGenerationTaskService {
 
@@ -75,6 +84,7 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
     private static final String BOUNDARY_MARKER = "【执行边界】";
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public String submitGenerationTask(Long userId, Long conversationId, String prompt, int n,
                                        String resolution, String aspectRatio, Long modelId, String refImages,
                                        String requestItems) {
@@ -86,21 +96,33 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
         JsonNode snapshots = parseRequestItems(requestItems);
         if (snapshots != null) for (JsonNode item : snapshots) ImagePromptCompiler.requireIndependent(item);
         // modelId 为空时取一个启用的 image 类出图模型(provider 限 yunwu/gptsapi)
-        Long resolvedModelId = (modelId != null) ? modelId : resolveImageModel().getId();
+        SysAiModel selectedModel = resolveImageModel(modelId, refImages != null && !refImages.isBlank());
+        Long resolvedModelId = selectedModel.getId();
         // 清晰度:调用方未指定则走模型默认清晰度(default_resolution)——对话内出图固定走默认,避免出 4K 大图
         String resolvedResolution = resolution;
         if (resolvedResolution == null || resolvedResolution.isBlank()) {
             SysAiModel rm = sysAiModelMapper.selectById(resolvedModelId);
             resolvedResolution = (rm != null) ? rm.getDefaultResolution() : null;
         }
+        resolvedResolution = resolveResolution(selectedModel, resolvedResolution);
+        aspectRatio = resolveAspectRatio(selectedModel, aspectRatio, resolvedResolution);
         String taskId = UUID.randomUUID().toString().replace("-", "");
         return persistAndQueueTask(taskId, userId, conversationId, null, prompt, n, resolvedResolution,
                 aspectRatio, resolvedModelId, refImages, requestItems);
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public String submitImageGeneration(Long userId, Long conversationId, String prompt, int n,
                                         String resolution, String aspectRatio, List<String> refImages) {
+        return submitImageGeneration(userId, conversationId, prompt, n, resolution, aspectRatio, refImages, null, null);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public String submitImageGeneration(Long userId, Long conversationId, String prompt, int n,
+                                        String resolution, String aspectRatio, List<String> refImages,
+                                        Long modelId, String requestId) {
         // 张数硬校验(与 submitGenerationTask 一致);图生图参考图最多 9 张(产品口径)
         if (n < 1 || n > 9) {
             throw new ServiceException("单次最多9张");
@@ -110,15 +132,22 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
         if (img2img && refImages.size() > 9) {
             throw new ServiceException("参考图最多9张");
         }
-        // 模型解析:图生图固定走云雾(image-edit 无需公网图床);文生图取任一启用 image 模型。
-        // 预扣取价的模型即消费者实际出图的模型(显式传 modelId 给 submitGenerationTask),口径一致。
-        SysAiModel model = img2img ? resolveYunwuImageModel() : resolveImageModel();
+        String normalizedRequestId = normalizeRequestId(requestId);
+        GenerationTask existing = findRequest(userId, normalizedRequestId);
+        if (existing != null) {
+            assertSameRequest(existing, conversationId, prompt, n, resolution, aspectRatio, modelId,
+                    toRefImagesJson(refImages), null);
+            return existing.getTaskId();
+        }
+        SysAiModel model = resolveImageModel(modelId, img2img);
         if (model == null) {
             throw new ServiceException("无可用出图模型");
         }
         String resolvedResolution = resolveResolution(model, resolution);
+        String resolvedAspectRatio = resolveAspectRatio(model, aspectRatio, resolvedResolution);
         // 预扣:按申请张数算应扣豆子;余额不足抛 InsufficientBeanException(携带余额/应扣/单价),不提交任务、不扣豆
         long needed = billingCalculator.imageBeans(model, n, resolvedResolution);
+        if (needed < 0 || needed > Integer.MAX_VALUE) throw new ServiceException("出图收费配置超出允许范围");
         if (beanDeductPort != null) {
             long balance = beanDeductPort.getBalance(userId);
             if (balance < needed) {
@@ -127,13 +156,24 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
             }
         }
         return submitPrepaidTask(userId, conversationId, null, prompt, n, resolvedResolution,
-                aspectRatio, model.getId(), toRefImagesJson(refImages), null, needed, "AI出图预扣");
+                resolvedAspectRatio, model, toRefImagesJson(refImages), null, needed, "AI出图预扣", normalizedRequestId);
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public String submitImageBatch(Long userId, Long conversationId, Long sourceMessageId,
                                    List<GenerateImageItem> items,
                                    String resolution, String aspectRatio, List<String> allRefImages) {
+        return submitImageBatch(userId, conversationId, sourceMessageId, items, resolution, aspectRatio,
+                allRefImages, null, null);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public String submitImageBatch(Long userId, Long conversationId, Long sourceMessageId,
+                                   List<GenerateImageItem> items,
+                                   String resolution, String aspectRatio, List<String> allRefImages,
+                                   Long modelId, String requestId) {
         if (items == null || items.isEmpty() || items.size() > 9) {
             throw new ServiceException("批量生图数量需为1~9张");
         }
@@ -202,15 +242,24 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
             resolvedItems.add(stored);
         }
 
-        SysAiModel model = img2img ? resolveYunwuImageModel() : resolveImageModel();
+        String normalizedRequestId = normalizeRequestId(requestId);
+        String frozenItems = toJsonValue(resolvedItems);
+        GenerationTask existing = findRequest(userId, normalizedRequestId);
+        if (existing != null) {
+            assertSameRequest(existing, conversationId, items.get(0).getPrompt(), items.size(),
+                    resolution, aspectRatio, modelId, toRefImagesJson(refs), frozenItems);
+            return existing.getTaskId();
+        }
+        SysAiModel model = resolveImageModel(modelId, img2img);
         String resolvedResolution = resolveResolution(model, resolution);
+        String resolvedAspectRatio = resolveAspectRatio(model, aspectRatio, resolvedResolution);
         int n = items.size();
         long needed = billingCalculator.imageBeans(model, n, resolvedResolution);
         assertAffordable(userId, model, resolvedResolution, needed);
 
         return submitPrepaidTask(userId, conversationId, sourceMessageId, items.get(0).getPrompt(), n,
-                resolvedResolution, aspectRatio, model.getId(), toRefImagesJson(refs),
-                toJsonValue(resolvedItems), needed, "AI出图预扣");
+                resolvedResolution, resolvedAspectRatio, model, toRefImagesJson(refs),
+                frozenItems, needed, "AI出图预扣", normalizedRequestId);
     }
 
     @Override
@@ -253,14 +302,26 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
 
     @Override
     public GenerationOptionsVO getGenerationOptions() {
-        SysAiModel model = resolveImageModel();
+        return getGenerationOptions(null);
+    }
+
+    @Override
+    public GenerationOptionsVO getGenerationOptions(Long modelId) {
+        SysAiModel model = resolveImageModel(modelId, false);
         List<String> supported = parseSupportedResolutions(model.getSupportedResolutions());
         String defaultResolution = resolveResolution(model, null);
         Map<String, Long> beanCosts = new LinkedHashMap<>();
         for (String item : supported) {
             beanCosts.put(item, billingCalculator.imagePrice(model, item));
         }
-        return new GenerationOptionsVO(supported, defaultResolution, beanCosts);
+        GenerationOptionsVO result = new GenerationOptionsVO(supported, defaultResolution, beanCosts);
+        result.setModelId(model.getId());
+        result.setModelName(model.getModelName());
+        result.setProvider(model.getProvider());
+        result.setAspectRatios(MobileModelCatalogService.csv(model.getSupportedAspectRatios()));
+        result.setSupportsReferenceImages(MobileModelCatalogService.supportsReferences(model.getProvider()));
+        result.setMaxReferenceImages(result.isSupportsReferenceImages() ? 9 : 0);
+        return result;
     }
 
     @Override
@@ -356,6 +417,7 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public String replayWorkItem(Long userId, String taskId, int seq, boolean failedOnly) {
         GenerationTask source = requireOwnedTask(userId, taskId);
         if (!List.of("SUCCEEDED", "FAILED", "CANCELLED").contains(source.getStatus())) {
@@ -373,7 +435,7 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
         if (model == null) {
             throw new ServiceException("原出图模型不存在，无法精确重新生成");
         }
-        if (!item.referenceImages().isEmpty() && !"yunwu".equalsIgnoreCase(model.getProvider())) {
+        if (!item.referenceImages().isEmpty() && !MobileModelCatalogService.supportsReferences(model.getProvider())) {
             throw new ServiceException("原模型不支持图生图，无法精确重新生成");
         }
         String resolution = source.getResolution();
@@ -384,24 +446,54 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
         assertAffordable(userId, model, resolution, needed);
 
         return submitPrepaidTask(userId, source.getConversationId(), null, item.prompt(), 1,
-                resolution, source.getAspectRatio(), source.getModelId(),
-                toRefImagesJson(item.referenceImages()), null, needed, "AI单张重新生成预扣");
+                resolution, source.getAspectRatio(), model,
+                toRefImagesJson(item.referenceImages()), null, needed, "AI单张重新生成预扣", null);
     }
 
-    /** 先完成原子预扣再发布任务；扣减失败时不会落库或进入图片队列。 */
+    /** Task snapshot and debit commit together; only committed rows enter the queue. */
     private String submitPrepaidTask(Long userId, Long conversationId, Long sourceMessageId,
                                      String prompt, int n,
-                                     String resolution, String aspectRatio, Long modelId,
-                                     String refImages, String requestItems, long needed, String remark) {
-        String taskId = UUID.randomUUID().toString().replace("-", "");
-        boolean deducted = beanDeductPort != null && needed > 0;
-        if (deducted) {
-            beanDeductPort.deduct(userId, needed, "img:" + taskId, remark);
-        }
+                                     String resolution, String aspectRatio, SysAiModel model,
+                                     String refImages, String requestItems, long needed, String remark,
+                                     String requestId) {
+        Long configuredPrice = switch (resolution == null ? "" : resolution.toUpperCase(Locale.ROOT)) {
+            case "1K" -> model.getBeanPerImage1k();
+            case "2K" -> model.getBeanPerImage2k();
+            case "4K" -> model.getBeanPerImage4k();
+            default -> null;
+        };
+        if (configuredPrice == null) configuredPrice = model.getBeanPerImage();
+        if (configuredPrice == null || configuredPrice < 0) throw new ServiceException("所选出图模型尚未配置收费标准");
+        String taskId = requestId == null ? UUID.randomUUID().toString().replace("-", "")
+                : UUID.nameUUIDFromBytes(("image:" + userId + ":" + requestId)
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString().replace("-", "");
+        GenerationTask task;
         try {
-            return persistAndQueueTask(taskId, userId, conversationId, sourceMessageId, prompt, n, resolution,
-                    aspectRatio, modelId, refImages, requestItems);
+            task = createTask(taskId, userId, conversationId, sourceMessageId, model.getId(), prompt,
+                    n, resolution, aspectRatio, refImages, requestItems);
+        } catch (DuplicateKeyException duplicate) {
+            // A locking read sees the winning transaction even under MySQL REPEATABLE READ.
+            GenerationTask existing = getOne(new LambdaQueryWrapper<GenerationTask>()
+                    .eq(GenerationTask::getTaskId, taskId).last("FOR UPDATE"));
+            if (requestId == null || existing == null || !Objects.equals(userId, existing.getUserId())) throw duplicate;
+            assertSameRequest(existing, conversationId, prompt, n, resolution, aspectRatio, model.getId(), refImages, requestItems);
+            return existing.getTaskId();
+        }
+        task.setRequestId(requestId);
+        freezeModel(task, model, needed);
+        if (!updateById(task)) throw new ServiceException("出图任务参数保存失败");
+        boolean deducted = false;
+        try {
+            if (beanDeductPort != null && needed > 0) {
+                beanDeductPort.deduct(userId, needed, "img:" + taskId, remark);
+                deducted = true;
+            }
+            markStatus(taskId, "QUEUED", null, null, null);
+            publishAfterCommit(task.getId());
+            return taskId;
         } catch (RuntimeException e) {
+            // The task snapshot and bean debit share the same database transaction in production.
+            if (TransactionSynchronizationManager.isActualTransactionActive()) throw e;
             try {
                 markStatus(taskId, "FAILED", null, 0, "任务提交失败");
             } catch (RuntimeException statusError) {
@@ -425,9 +517,42 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
                                        String refImages, String requestItems) {
         GenerationTask task = createTask(taskId, userId, conversationId, sourceMessageId,
                 modelId, prompt, n, resolution, aspectRatio, refImages, requestItems);
+        SysAiModel model = sysAiModelMapper.selectById(modelId);
+        if (model != null) {
+            freezeModel(task, model, 0);
+            updateById(task);
+        }
         markStatus(taskId, "QUEUED", null, null, null);
-        taskProducer.send(TASK_TYPE, Map.of("generationTaskId", task.getId()));
+        publishAfterCommit(task.getId());
         return taskId;
+    }
+
+    private void freezeModel(GenerationTask task, SysAiModel model, long prepaid) {
+        task.setModelNameSnapshot(model.getModelName());
+        task.setProviderSnapshot(model.getProvider());
+        task.setBaseUrlSnapshot(model.getBaseUrl());
+        task.setModelDeploymentSnapshot(model.getModelDeployment());
+        task.setImageQualitySnapshot(model.getImageQuality());
+        task.setBeanPerImageSnapshot(billingCalculator.imagePrice(model, task.getResolution()));
+        task.setPrepaidBeans(beanDeductPort == null ? 0 : prepaid);
+    }
+
+    private void publishAfterCommit(Long id) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            taskProducer.send(TASK_TYPE, Map.of("generationTaskId", id));
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                try {
+                    taskProducer.send(TASK_TYPE, Map.of("generationTaskId", id));
+                } catch (RuntimeException error) {
+                    // The recovery scheduler re-publishes durable QUEUED rows after a Redis outage.
+                    log.warn("图片任务已保存，等待队列恢复: generationTaskId={}", id);
+                }
+            }
+        });
     }
 
     /**
@@ -435,17 +560,34 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
      * 无可用云雾出图模型抛业务异常。
      */
     private SysAiModel resolveYunwuImageModel() {
+        return resolveImageModel(null, true);
+    }
+
+    private SysAiModel resolveImageModel(Long modelId, boolean withReferences) {
+        if (modelId != null) {
+            SysAiModel model = sysAiModelMapper.selectById(modelId);
+            if (model == null || !"image".equals(model.getModelType()) || !Integer.valueOf(1).equals(model.getIsActive())
+                    || !MobileModelCatalogService.supportsImageProvider(model.getProvider())) {
+                throw new ServiceException("所选出图模型不存在、未启用或不支持出图");
+            }
+            if (withReferences && !MobileModelCatalogService.supportsReferences(model.getProvider())) {
+                throw new ServiceException("所选出图模型不支持参考图");
+            }
+            if (model.getApiKey() == null || model.getApiKey().isBlank()) throw new ServiceException("出图模型尚未配置密钥");
+            return model;
+        }
         LambdaQueryWrapper<SysAiModel> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(SysAiModel::getModelType, "image")
                 .eq(SysAiModel::getIsActive, 1)
-                .eq(SysAiModel::getProvider, "yunwu")
+                .in(SysAiModel::getProvider, withReferences ? List.of("yunwu", "luxai") : List.of("yunwu", "gptsapi", "luxai"))
+                .isNotNull(SysAiModel::getApiKey).ne(SysAiModel::getApiKey, "")
                 // 默认图像模型优先(is_default=1),否则按 sort_order 取第一条
                 .orderByDesc(SysAiModel::getIsDefault)
                 .orderByAsc(SysAiModel::getSortOrder)
                 .last("LIMIT 1");
         SysAiModel model = sysAiModelMapper.selectOne(wrapper);
         if (model == null) {
-            throw new ServiceException("无可用图生图模型(需云雾出图模型)");
+            throw new ServiceException(withReferences ? "无可用图生图模型" : "无可用出图模型");
         }
         return model;
     }
@@ -465,19 +607,38 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
      * 无可用模型抛业务异常。
      */
     private SysAiModel resolveImageModel() {
-        LambdaQueryWrapper<SysAiModel> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(SysAiModel::getModelType, "image")
-                .eq(SysAiModel::getIsActive, 1)
-                .in(SysAiModel::getProvider, "yunwu", "gptsapi")
-                // 默认图像模型优先(is_default=1),否则按 sort_order 取第一条
-                .orderByDesc(SysAiModel::getIsDefault)
-                .orderByAsc(SysAiModel::getSortOrder)
-                .last("LIMIT 1");
-        SysAiModel model = sysAiModelMapper.selectOne(wrapper);
-        if (model == null) {
-            throw new ServiceException("无可用出图模型");
+        return resolveImageModel(null, false);
+    }
+
+    private String normalizeRequestId(String requestId) {
+        if (requestId == null || requestId.isBlank()) return null;
+        if (!requestId.matches("[A-Za-z0-9_:-]{1,64}")) throw new ServiceException("请求编号格式无效");
+        return requestId;
+    }
+
+    private GenerationTask findRequest(Long userId, String requestId) {
+        return requestId == null ? null : getOne(new LambdaQueryWrapper<GenerationTask>()
+                .eq(GenerationTask::getUserId, userId).eq(GenerationTask::getRequestId, requestId));
+    }
+
+    private void assertSameRequest(GenerationTask task, Long conversationId, String prompt, int n,
+                                    String resolution, String aspectRatio, Long modelId,
+                                    String refs, String items) {
+        if (!Objects.equals(task.getConversationId(), conversationId) || !Objects.equals(task.getPrompt(), prompt)
+                || !Objects.equals(task.getN(), n) || !Objects.equals(task.getRefImages(), refs)
+                || !Objects.equals(task.getRequestItems(), items)
+                || (modelId != null && !Objects.equals(task.getModelId(), modelId))
+                || (resolution != null && !resolution.isBlank() && !resolution.equalsIgnoreCase(task.getResolution()))
+                || (aspectRatio != null && !aspectRatio.isBlank() && !aspectRatio.equals(task.getAspectRatio()))) {
+            throw new ServiceException("同一请求编号不能重复提交不同的出图内容");
         }
-        return model;
+    }
+
+    @Override
+    public boolean tryStart(String taskId) {
+        return update(new LambdaUpdateWrapper<GenerationTask>().eq(GenerationTask::getTaskId, taskId)
+                .in(GenerationTask::getStatus, "QUEUED", "CREATED").set(GenerationTask::getStatus, "RUNNING")
+                .set(GenerationTask::getUpdateTime, java.time.LocalDateTime.now()));
     }
 
     @Override
@@ -500,7 +661,7 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
         task.setRequestItems(requestItems);
         task.setStatus("CREATED");
         task.setSuccessCount(0);
-        save(task);
+        if (!save(task)) throw new ServiceException("出图任务保存失败");
         return task;
     }
 
@@ -509,7 +670,8 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
     public void markStatus(String taskId, String status, List<String> resultUrls, Integer successCount, String errorMsg) {
         LambdaUpdateWrapper<GenerationTask> wrapper = new LambdaUpdateWrapper<>();
         wrapper.eq(GenerationTask::getTaskId, taskId)
-                .set(GenerationTask::getStatus, status);
+                .set(GenerationTask::getStatus, status)
+                .set(GenerationTask::getUpdateTime, java.time.LocalDateTime.now());
         // resultUrls 不为空时序列化为 JSON 串写 result_urls 列;为 null 表示本次不更新该列
         if (resultUrls != null) {
             wrapper.set(GenerationTask::getResultUrls, toJson(resultUrls));
@@ -529,7 +691,8 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
         // 仅回写 bean_cost,不触碰状态/结果列;与 markStatus 分离,出图结算时单独调用
         LambdaUpdateWrapper<GenerationTask> wrapper = new LambdaUpdateWrapper<>();
         wrapper.eq(GenerationTask::getTaskId, taskId)
-                .set(GenerationTask::getBeanCost, beanCost);
+                .set(GenerationTask::getBeanCost, beanCost)
+                .set(GenerationTask::getUpdateTime, java.time.LocalDateTime.now());
         update(wrapper);
     }
 
@@ -613,6 +776,7 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
     }
 
     private void assertAffordable(Long userId, SysAiModel model, String resolution, long needed) {
+        if (needed < 0 || needed > Integer.MAX_VALUE) throw new ServiceException("出图收费配置超出允许范围");
         if (beanDeductPort == null) {
             return;
         }
@@ -656,6 +820,17 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
             throw new ServiceException("所选分辨率未在后台启用");
         }
         return matched;
+    }
+
+    private String resolveAspectRatio(SysAiModel model, String requested, String resolution) {
+        List<String> allowed = MobileModelCatalogService.csv(model.getSupportedAspectRatios());
+        String ratio = requested == null || requested.isBlank() ? (allowed.isEmpty() ? null : allowed.get(0)) : requested.trim();
+        if (!allowed.isEmpty() && !allowed.contains(ratio)) throw new ServiceException("所选画幅比例未在后台启用");
+        if ("luxai".equalsIgnoreCase(model.getProvider())) {
+            LuxaiImageSize.of(resolution, ratio);
+            LuxaiImageClient.quality(model.getImageQuality());
+        }
+        return ratio;
     }
 
     private String matchResolution(String value, List<String> supported) {

@@ -7,6 +7,7 @@ import com.aurora.ai.mapper.SysAiModelMapper;
 import com.aurora.ai.provider.GptsImageClient;
 import com.aurora.ai.provider.KlingVideoClient;
 import com.aurora.ai.provider.YunwuImageClient;
+import com.aurora.ai.provider.LuxaiImageClient;
 import com.aurora.ai.provider.support.ImageConcurrencyGate;
 import com.aurora.ai.service.AiFactory;
 import com.aurora.ai.service.AiService;
@@ -43,6 +44,7 @@ public class AiServiceImpl implements AiService {
     private final RetryableAiService retryableAiService;
     private final YunwuImageClient yunwuImageClient;
     private final GptsImageClient gptsImageClient;
+    private final LuxaiImageClient luxaiImageClient;
     private final KlingVideoClient klingVideoClient;
     private final EncryptUtils encryptUtils;
     private final ApiRateLimiter apiRateLimiter;
@@ -141,6 +143,11 @@ public class AiServiceImpl implements AiService {
                 String apiKey = encryptUtils.decrypt(config.getApiKey());
                 byte[] image = yunwuImageClient.textToImage(config.getBaseUrl(), apiKey,
                         config.getModelDeployment(), prompt, resolution, aspectRatio);
+                imageUrl = saveImageToProfile(image);
+            } else if ("luxai".equalsIgnoreCase(provider)) {
+                String apiKey = encryptUtils.decrypt(config.getApiKey());
+                byte[] image = luxaiImageClient.textToImage(config.getBaseUrl(), apiKey,
+                        config.getModelDeployment(), prompt, resolution, aspectRatio, config.getImageQuality());
                 imageUrl = saveImageToProfile(image);
             } else if ("gptsapi".equalsIgnoreCase(provider)) {
                 String apiKey = encryptUtils.decrypt(config.getApiKey());
