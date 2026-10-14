@@ -176,8 +176,12 @@
 			</scroll-view>
 
 			<view class="chat-models" v-if="userStore.isLoggedIn">
-				<ModelSelector label="对话" :models="chatModels" :model-value="conversationStore.currentSession.modelId" :disabled="interactionLocked" :loading="modelsLoading" @update:model-value="selectChatModel" />
-				<ModelSelector label="出图" :models="imageModels" :model-value="conversationStore.currentSession.imageModelId" :disabled="interactionLocked" :loading="modelsLoading" @update:model-value="selectImageModel" />
+				<view class="chat-model-slot">
+					<ModelSelector compact label="对话" :models="chatModels" :model-value="conversationStore.currentSession.modelId" :disabled="interactionLocked" :loading="modelsLoading" @update:model-value="selectChatModel" />
+				</view>
+				<view class="chat-model-slot">
+					<ModelSelector compact label="出图" :models="imageModels" :model-value="conversationStore.currentSession.imageModelId" :disabled="interactionLocked" :loading="modelsLoading" @update:model-value="selectImageModel" />
+				</view>
 			</view>
 			<!-- 编辑器:上传/文字/发送三段固定分区,文字增高不改变按钮位置与可用宽度 -->
 			<view
@@ -2565,6 +2569,16 @@ onBeforeUnmount(() => {
 }
 
 /* ====== 底部输入区 ====== */
+.chat-models {
+	display: flex;
+	gap: 12rpx;
+}
+
+.chat-model-slot {
+	flex: 1;
+	min-width: 0;
+}
+
 .dock {
 	position: fixed;
 	left: 36rpx;
