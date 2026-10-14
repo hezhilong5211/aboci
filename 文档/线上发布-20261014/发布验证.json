@@ -1,0 +1,30 @@
+{
+  "completedAt": "2026-10-14T02:13:47.593458+00:00",
+  "commit": "292d65d",
+  "schema": 52,
+  "productionConfigPreserved": true,
+  "testUserId": 910014,
+  "testBeansGranted": 100,
+  "testBeansRecovered": 78,
+  "testBeansConsumed": 22,
+  "testUserBalance": 0,
+  "testUserDisabled": true,
+  "adminPublicApi": true,
+  "signedWechatPushCheck": true,
+  "defaults": {
+    "chatModels": [
+      "gpt-6.1-sol"
+    ],
+    "imageModels": [
+      "gpt-image-2.5-flare"
+    ]
+  },
+  "oldClient": {
+    "check": "old-client-payload-default-models",
+    "passed": true,
+    "conversationId": 368,
+    "modelId": 19,
+    "imageModelId": 17,
+    "status": "COMPLETED"
+  }
+}

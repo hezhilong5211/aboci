@@ -1,0 +1,117 @@
+[
+  {
+    "check": "mobile-session-refresh",
+    "passed": true
+  },
+  {
+    "check": "wechat-push-signed-url-check",
+    "passed": true
+  },
+  {
+    "check": "two-conversations-started-and-streams-disconnected",
+    "conversations": [
+      366,
+      367
+    ]
+  },
+  {
+    "check": "parallel-image-and-recovery",
+    "conversationId": 366,
+    "status": "COMPLETED",
+    "modelId": 19,
+    "imageModelId": 17,
+    "tasks": [
+      {
+        "taskId": "f8d981a08cb13fdf88c079608c87c620",
+        "status": "SUCCEEDED",
+        "n": 1,
+        "successCount": 1,
+        "resultUrls": [
+          "/profile/generated/045d097b-5d5a-43a6-b3e0-dd7af64799d9.png"
+        ],
+        "previewUrls": [
+          "/profile/generated/045d097b-5d5a-43a6-b3e0-dd7af64799d9.preview.jpg"
+        ],
+        "errorMsg": null,
+        "modelId": 17,
+        "modelName": "GPT Image 2.5 Flare (Luxai)",
+        "resolution": "1K",
+        "aspectRatio": "1:1",
+        "beanPerImage": 6,
+        "prepaidBeans": 6,
+        "beanCost": 6
+      }
+    ]
+  },
+  {
+    "check": "parallel-image-and-recovery",
+    "conversationId": 367,
+    "status": "COMPLETED",
+    "modelId": 19,
+    "imageModelId": 18,
+    "tasks": [
+      {
+        "taskId": "9d738d7daa1732ddad1b2ace485c290d",
+        "status": "SUCCEEDED",
+        "n": 1,
+        "successCount": 1,
+        "resultUrls": [
+          "/profile/generated/4d7ccf3d-4a6b-4d3e-bc38-48b7bbced0bd.png"
+        ],
+        "previewUrls": [
+          "/profile/generated/4d7ccf3d-4a6b-4d3e-bc38-48b7bbced0bd.preview.jpg"
+        ],
+        "errorMsg": null,
+        "modelId": 18,
+        "modelName": "GPT Image 2.5 Sunburst (Luxai)",
+        "resolution": "1K",
+        "aspectRatio": "1:1",
+        "beanPerImage": 6,
+        "prepaidBeans": 6,
+        "beanCost": 6
+      }
+    ]
+  },
+  {
+    "check": "request-replay-no-duplicate-debit",
+    "passed": true
+  },
+  {
+    "check": "historical-image-edit",
+    "conversationId": 366,
+    "tasks": [
+      {
+        "taskId": "11cdc3b9886f3a4d854d5a6be85d5a1a",
+        "status": "SUCCEEDED",
+        "n": 1,
+        "successCount": 1,
+        "resultUrls": [
+          "/profile/generated/77f06b1d-b5ff-428a-9432-c484e256aa89.png"
+        ],
+        "previewUrls": [
+          "/profile/generated/77f06b1d-b5ff-428a-9432-c484e256aa89.preview.jpg"
+        ],
+        "errorMsg": null,
+        "modelId": 17,
+        "modelName": "GPT Image 2.5 Flare (Luxai)",
+        "resolution": "1K",
+        "aspectRatio": "1:1",
+        "beanPerImage": 6,
+        "prepaidBeans": 6,
+        "beanCost": 6
+      }
+    ],
+    "referencesPreviousImage": true
+  },
+  {
+    "check": "release-ledger",
+    "ledger": "ADJUST\t100\tNULL\nDEDUCT\t-6\timg:9d738d7daa1732ddad1b2ace485c290d\nDEDUCT\t-1\tmsg:4366\nDEDUCT\t-6\timg:f8d981a08cb13fdf88c079608c87c620\nDEDUCT\t-1\tmsg:4367\nDEDUCT\t-6\timg:11cdc3b9886f3a4d854d5a6be85d5a1a\nDEDUCT\t-1\tmsg:4369",
+    "balance": {
+      "balance": 79,
+      "totalEarned": 100,
+      "totalConsumed": 21,
+      "totalExpired": 0,
+      "totalRevoked": 0
+    }
+  }
+]
