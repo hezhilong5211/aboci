@@ -77,6 +77,34 @@ class SysAiModelConfigurationTest {
     }
 
     @Test
+    void publicTierDefaultsOnCreateRejectsPrivateNamesAndSurvivesPartialEdit() {
+        SysAiModel model = new SysAiModel();
+        model.setModelType("chat");
+        model.setIsActive(0);
+        assertThat(controller.add(model).getCode()).isEqualTo(200);
+        assertThat(model.getDisplayTier()).isEqualTo("中");
+        clearInvocations(models);
+        for (String invalid : java.util.List.of("GPT-6.1 Sol", "", " 高 ")) {
+            model.setDisplayTier(invalid);
+            assertThat(controller.add(model).getMsg()).contains("小程序档位");
+        }
+        verify(models, never()).insert(any(SysAiModel.class));
+        model.setId(14L);
+        model.setDisplayTier("高");
+        when(models.selectById(14L)).thenReturn(model);
+        SysAiModel update = new SysAiModel();
+        update.setId(14L);
+        update.setModelName("internal rename");
+        assertThat(controller.edit(update).getCode()).isEqualTo(200);
+        assertThat(model.getDisplayTier()).isEqualTo("高");
+        assertThat(update.getDisplayTier()).isNull();
+        clearInvocations(models);
+        update.setDisplayTier("internal private model");
+        assertThat(controller.edit(update).getMsg()).contains("小程序档位");
+        verify(models, never()).updateById(any(SysAiModel.class));
+    }
+
+    @Test
     void disabledOrUncredentialedModelCannotBecomeDefaultAndReferencedModelCannotBeDeleted() {
         SysAiModel model = imageModel();
         model.setId(14L);

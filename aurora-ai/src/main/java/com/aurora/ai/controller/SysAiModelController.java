@@ -110,6 +110,7 @@ public class SysAiModelController {
     @PostMapping
     @PreAuthorize("@ss.hasPermi('ai:model:add')")
     public Result<Void> add(@RequestBody SysAiModel sysAiModel) {
+        if (sysAiModel.getDisplayTier() == null) sysAiModel.setDisplayTier("中");
         String validationError = validateModelConfiguration(sysAiModel);
         if (validationError != null) {
             return Result.error(validationError);
@@ -209,6 +210,9 @@ public class SysAiModelController {
 
     private String validateModelConfiguration(SysAiModel model) {
         if (model == null) return "模型配置不能为空";
+        if (model.getDisplayTier() != null && !List.of("轻", "中", "高").contains(model.getDisplayTier())) {
+            return "小程序档位只能选择轻、中或高";
+        }
         if ("gpt-6.1-sol".equalsIgnoreCase(model.getModelDeployment())) {
             if (model.getApiProtocol() == null || model.getApiProtocol().isBlank()) model.setApiProtocol("responses");
             if (!"responses".equalsIgnoreCase(model.getApiProtocol())) return "GPT-6.1 Sol 需使用 Responses 协议";

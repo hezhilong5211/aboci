@@ -31,6 +31,9 @@ public class SysAiModel implements Serializable {
      */
     private String modelName;
 
+    /** 小程序公开档位，只允许 轻 / 中 / 高。真实名称仅用于内部管理。 */
+    private String displayTier;
+
     /**
      * Encrypted API Key
      */

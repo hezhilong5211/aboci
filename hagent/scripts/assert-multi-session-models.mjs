@@ -383,6 +383,51 @@ await check('迟到创建保留本轮文本、参考图顺序与引用、skill �
 	assert.equal(draft.skill, 'portrait'); assert.equal(draft.option, 'keep-original')
 	assert.equal(scope.inputText.value, 'new session prompt'); assert.equal(scope.pendingImages.value[0].url, '/new-session.png')
 })
+await check('模型卡片、选择列表和计费弹窗只展示公开档位，选择仍使用原模型编号', () => {
+	const source = read('components/common/ModelSelector.vue')
+	const { descriptor } = parse(source)
+	assert.match(descriptor.template.content, /:range="publicOptions" range-key="displayName"/)
+	assert.doesNotMatch(descriptor.template.content, /modelName/)
+	const models = [
+		{ modelId: 14, modelName: 'internal legacy name', displayTier: '轻', modelType: 'image', beanCosts: { '1K': 6, '2K': 10 } },
+		{ modelId: 17, modelName: 'internal standard name', displayTier: '中', modelType: 'image', beanCosts: { '1K': 6, '2K': 10 } },
+		{ modelId: 18, modelName: 'internal premium name', displayTier: '高', modelType: 'image', beanCosts: { '1K': 6, '2K': 10 } },
+	]
+	const props = reactive({ label: '出图', models, modelValue: 18, compact: true, disabled: false, loading: false })
+	let modal, emitted
+	const scope = vm.createContext({ computed, defineProps: () => props, defineEmits: () => (...args) => { emitted = args },
+		uni: { showModal: (options) => { modal = options } },
+	})
+	vm.runInContext(descriptor.scriptSetup.content.replace(/^import .*$/gm, '') + '\nvar view = { publicOptions, displayName, pricingSummary, showPricing, select }', scope)
+	assert.deepEqual(Array.from(scope.view.publicOptions.value, (option) => option.displayName), ['轻', '中', '高'])
+	assert.equal(scope.view.displayName.value, '高')
+	assert.equal(scope.view.pricingSummary.value, '6 豆/张起')
+	scope.view.showPricing()
+	assert.equal(modal.content, '高\n\n1K 6 豆/张 · 2K 10 豆/张')
+	scope.view.select({ detail: { value: 1 } })
+	assert.deepEqual(emitted, ['update:modelValue', 17])
+	props.disabled = true; emitted = null
+	scope.view.select({ detail: { value: 0 } }); assert.equal(emitted, null)
+	props.compact = false
+	assert.equal(scope.view.displayName.value, '高')
+	// Reordering/default selection must not rename tiers or change the model selected by ID.
+	props.models = [models[2], models[0], models[1]]
+	assert.equal(scope.view.displayName.value, '高')
+	props.disabled = false; scope.view.select({ detail: { value: 1 } })
+	assert.deepEqual(emitted, ['update:modelValue', 14])
+	// Unknown/old server responses fail closed, including their pricing modal.
+	props.models = [{ modelId: 19, modelName: 'private vendor model', displayTier: 'private name', modelType: 'chat', beanPerMtokenInput: 25, beanPerMtokenOutput: 25, beanPerMtokenInputCached: 12 }]
+	props.modelValue = 19
+	assert.equal(scope.view.displayName.value, '中')
+	assert.equal(scope.view.pricingSummary.value, '按用量计费')
+	scope.view.showPricing()
+	assert.doesNotMatch(modal.content, /private|vendor|model/)
+	assert.match(modal.content, /输入 25 · 输出 25 · 缓存输入 12/)
+	props.models = [{ modelId: 19, modelName: '轻' }]
+	assert.equal(scope.view.displayName.value, '轻')
+	props.models = []
+	assert.equal(scope.view.displayName.value, '请选择档位')
+})
 await check('Vue 脚本与模板可编译', () => {
 	for (const file of ['pages/index/ChatContent.vue', 'pages/index/components/HistoryOverlay.vue', 'pages/create/CreateContent.vue', 'components/common/ModelSelector.vue']) {
 		const { descriptor, errors } = parse(read(file), { filename: file }); assert.equal(errors.length, 0)

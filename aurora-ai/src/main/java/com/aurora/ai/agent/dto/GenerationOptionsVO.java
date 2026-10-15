@@ -21,8 +21,8 @@ public class GenerationOptionsVO implements Serializable {
     private Map<String, Long> beanCosts;
 
     private Long modelId;
+    /** Public tier label: 轻 / 中 / 高. */
     private String modelName;
-    private String provider;
     private List<String> aspectRatios;
     private boolean supportsReferenceImages;
     private int maxReferenceImages;

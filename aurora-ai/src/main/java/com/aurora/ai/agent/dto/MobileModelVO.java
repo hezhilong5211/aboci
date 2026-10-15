@@ -4,13 +4,13 @@ import lombok.Data;
 import java.util.List;
 import java.util.Map;
 
-/** Public catalogue: deliberately contains no endpoint or credential fields. */
+/** Public catalogue: contains tier labels, never internal model names, suppliers or credentials. */
 @Data
 public class MobileModelVO {
     private Long modelId;
+    /** Public tier label: 轻 / 中 / 高. */
     private String modelName;
-    private String modelDeployment;
-    private String provider;
+    private String displayTier;
     private String modelType;
     private Boolean isDefault;
     private List<String> resolutions;

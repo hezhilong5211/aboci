@@ -3,6 +3,7 @@ package com.aurora.ai.agent.service;
 import com.aurora.ai.agent.billing.BillingCalculator;
 import com.aurora.ai.agent.billing.IBeanDeductPort;
 import com.aurora.ai.agent.domain.GenerationTask;
+import com.aurora.ai.agent.dto.GenerationTaskVO;
 import com.aurora.ai.agent.mapper.GenerationTaskMapper;
 import com.aurora.ai.agent.service.impl.GenerationTaskServiceImpl;
 import com.aurora.ai.domain.SysAiModel;
@@ -47,6 +48,7 @@ class GenerationTaskBillingSnapshotTest {
         model.setIsActive(1);
         model.setApiKey("encrypted");
         model.setModelName("GPT Image 2.5 Flare");
+        model.setDisplayTier("中");
         model.setModelDeployment("gpt-image-2.5-flare");
         model.setBaseUrl("https://api.openlux.ai/v1");
         model.setSupportedResolutions("1K,2K");
@@ -65,6 +67,37 @@ class GenerationTaskBillingSnapshotTest {
         when(taskMapper.updateById(any(GenerationTask.class))).thenReturn(1);
         doReturn(null).when(service).getOne(any(LambdaQueryWrapper.class));
         doNothing().when(service).markStatus(anyString(), anyString(), any(), any(), any());
+    }
+
+    @Test
+    void publicOptionsAndTaskRecoveryHideModelAndSupplierButKeepPricesAndSelection() throws Exception {
+        var options = service.getGenerationOptions(14L);
+        ObjectMapper json = new ObjectMapper();
+        assertThat(options.getModelName()).isEqualTo("中");
+        assertThat(options.getModelId()).isEqualTo(14L);
+        assertThat(options.getBeanCosts()).containsEntry("1K", 8L).containsEntry("2K", 15L);
+        assertThat(json.writeValueAsString(options))
+                .doesNotContain("GPT", "gpt-", "Flare", "provider", "luxai", "modelDeployment");
+
+        service.submitImageGeneration(7L, null, "draw", 2, "2K", "16:9", List.of(), 14L, "tier-test");
+        ArgumentCaptor<GenerationTask> captured = ArgumentCaptor.forClass(GenerationTask.class);
+        verify(taskMapper).insert(captured.capture());
+        GenerationTask task = captured.getValue();
+        var recovery = GenerationTaskVO.from(task, json);
+        assertThat(recovery.getModelId()).isEqualTo(14L);
+        assertThat(recovery.getBeanPerImage()).isEqualTo(15L);
+        assertThat(recovery.getPrepaidBeans()).isEqualTo(30L);
+        assertThat(json.writeValueAsString(recovery))
+                .doesNotContain("modelName", "GPT", "gpt-", "Flare", "provider", "luxai", "modelDeployment");
+        // Real names remain available in internal snapshots for retries and support.
+        assertThat(task.getModelNameSnapshot()).isEqualTo("GPT Image 2.5 Flare");
+        assertThat(task.getModelDeploymentSnapshot()).isEqualTo("gpt-image-2.5-flare");
+
+        task.setModelDeploymentSnapshot(null);
+        task.setModelNameSnapshot("GPT Image 2.5 Sunburst (Luxai)");
+        assertThat(json.writeValueAsString(GenerationTaskVO.from(task, json))).doesNotContain("Sunburst", "Luxai", "modelName");
+        task.setModelNameSnapshot("a future private model name");
+        assertThat(json.writeValueAsString(GenerationTaskVO.from(task, json))).doesNotContain("private model", "modelName");
     }
 
     @Test

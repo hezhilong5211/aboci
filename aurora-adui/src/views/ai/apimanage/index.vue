@@ -84,6 +84,7 @@
       >
         <template #columns>
           <a-table-column title="名称" data-index="modelName" align="center" ellipsis tooltip />
+          <a-table-column title="小程序档位" data-index="displayTier" align="center" :width="110" />
           <a-table-column title="部署ID" data-index="modelDeployment" align="center" ellipsis tooltip :width="280" />
           <a-table-column title="Base URL" data-index="baseUrl" align="center" ellipsis tooltip />
           <a-table-column title="状态" data-index="isActive" align="center">
@@ -157,6 +158,15 @@
           <a-col :span="12">
             <a-form-item label="模型名称" field="modelName">
               <a-input v-model="form.modelName" placeholder="例如: DeepSeek V3" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12" v-if="form.modelType === 'chat' || form.modelType === 'image'">
+            <a-form-item label="小程序档位" field="displayTier" extra="用户仅看到此档位，真实模型名称只在后台显示">
+              <a-select v-model="form.displayTier" placeholder="请选择公开档位">
+                <a-option value="轻">轻</a-option>
+                <a-option value="中">中</a-option>
+                <a-option value="高">高</a-option>
+              </a-select>
             </a-form-item>
           </a-col>
           <a-col :span="12">
@@ -389,6 +399,7 @@ const queryParams = reactive({
 
 const form = ref<SysAiModel>({
   modelName: '',
+  displayTier: '中',
   apiKey: '',
   imageQuality: 'auto',
   baseUrl: 'https://api.openai.com',
@@ -415,6 +426,7 @@ const form = ref<SysAiModel>({
 
 const rules = {
   modelName: [{ required: true, message: "请输入模型名称" }],
+  displayTier: [{ required: true, message: "请选择小程序档位" }],
   apiKey: [{ required: true, message: "请输入API Key" }],
   baseUrl: [{ required: true, message: "请输入Base URL" }],
   modelDeployment: [{ required: true, message: "请输入部署ID" }]
@@ -558,6 +570,7 @@ function reset() {
   form.value = {
     id: undefined,
     modelName: '',
+    displayTier: '中',
     apiKey: '',
   imageQuality: 'auto',
     baseUrl: 'https://api.openai.com',
@@ -596,7 +609,7 @@ function handleUpdate(row: SysAiModel) {
   reset();
   const id = row.id!;
   getSysAiModel(id).then((response: any) => {
-    form.value = { ...response, imageQuality: response.imageQuality || 'auto' };
+    form.value = { ...response, displayTier: response.displayTier || '中', imageQuality: response.imageQuality || 'auto' };
     // 回显图像模型画质/画幅:逗号分隔字符串 → 数组(空串→空数组)
     resolutionList.value = response.supportedResolutions ? response.supportedResolutions.split(',') : [];
     ratioList.value = response.supportedAspectRatios ? response.supportedAspectRatios.split(',') : [];

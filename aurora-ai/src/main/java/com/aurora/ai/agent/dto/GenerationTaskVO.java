@@ -51,7 +51,6 @@ public class GenerationTaskVO implements Serializable {
     private String errorMsg;
 
     private Long modelId;
-    private String modelName;
     private String resolution;
     private String aspectRatio;
     private Long beanPerImage;
@@ -76,7 +75,6 @@ public class GenerationTaskVO implements Serializable {
                 ? url.substring(0, url.length() - 4) + ".preview.jpg" : url).toList());
         vo.setErrorMsg(task.getErrorMsg());
         vo.setModelId(task.getModelId());
-        vo.setModelName(task.getModelNameSnapshot());
         vo.setResolution(task.getResolution());
         vo.setAspectRatio(task.getAspectRatio());
         vo.setBeanPerImage(task.getBeanPerImageSnapshot());

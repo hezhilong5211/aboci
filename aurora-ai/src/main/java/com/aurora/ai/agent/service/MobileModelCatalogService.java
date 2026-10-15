@@ -2,6 +2,7 @@ package com.aurora.ai.agent.service;
 
 import com.aurora.ai.agent.billing.BillingCalculator;
 import com.aurora.ai.agent.dto.MobileModelVO;
+import com.aurora.ai.agent.dto.PublicModelTier;
 import com.aurora.ai.domain.SysAiModel;
 import com.aurora.ai.mapper.SysAiModelMapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -69,9 +70,8 @@ public class MobileModelCatalogService {
     private MobileModelVO toPublicModel(SysAiModel model) {
         MobileModelVO result = new MobileModelVO();
         result.setModelId(model.getId());
-        result.setModelName(model.getModelName());
-        result.setModelDeployment(model.getModelDeployment());
-        result.setProvider(model.getProvider());
+        result.setModelName(PublicModelTier.nameOf(model));
+        result.setDisplayTier(PublicModelTier.nameOf(model));
         result.setModelType(model.getModelType());
         result.setIsDefault(Integer.valueOf(1).equals(model.getIsDefault()));
         result.setResolutions(csv(model.getSupportedResolutions()));

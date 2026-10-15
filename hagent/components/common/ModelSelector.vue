@@ -1,7 +1,7 @@
 <template>
 	<view class="model-selector" :class="{ 'model-selector--compact': compact, 'model-selector--disabled': disabled }">
 		<view class="model-selector-body">
-			<picker v-if="models.length" class="model-selector-picker" mode="selector" :range="models" range-key="modelName" :value="selectedIndex" :disabled="disabled || loading" @change="select">
+			<picker v-if="models.length" class="model-selector-picker" mode="selector" :range="publicOptions" range-key="displayName" :value="selectedIndex" :disabled="disabled || loading" @change="select">
 				<view class="model-selector-trigger" hover-class="model-selector-trigger--pressed">
 					<view class="model-selector-heading">
 						<text class="model-selector-label">{{ label }}</text>
@@ -12,7 +12,7 @@
 			</picker>
 			<view v-else class="model-selector-trigger">
 				<text class="model-selector-label">{{ label }}</text>
-				<text class="model-selector-name model-selector-empty">{{ loading ? '模型加载中…' : '暂无可用模型' }}</text>
+				<text class="model-selector-name model-selector-empty">{{ loading ? '档位加载中…' : '暂无可用档位' }}</text>
 			</view>
 			<view v-if="selected" class="model-selector-fee" hover-class="model-selector-fee--pressed" role="button" :aria-label="`${label}计费说明`" @tap.stop="showPricing">
 				<text class="model-selector-price">{{ compact ? pricingSummary : pricing }}</text>
@@ -27,11 +27,15 @@ const props = defineProps({ label: String, models: { type: Array, default: () =>
 const emit = defineEmits(['update:modelValue'])
 const selectedIndex = computed(() => Math.max(0, props.models.findIndex((model) => String(model.modelId) === String(props.modelValue))))
 const selected = computed(() => props.models.find((model) => String(model.modelId) === String(props.modelValue)))
-// The picker and pricing dialog retain the complete configured model name.
-const displayName = computed(() => {
-	const name = selected.value ? selected.value.modelName : '请选择模型'
-	return props.compact ? name.replace(/\s*[（(]Luxai[)）]\s*$/i, '') : name
-})
+// Only public tiers may reach the UI, including when an older server returns internal names.
+function publicName(model) {
+	const tiers = ['轻', '中', '高']
+	if (tiers.includes(model.displayTier)) return model.displayTier
+	if (tiers.includes(model.modelName)) return model.modelName
+	return '中'
+}
+const publicOptions = computed(() => props.models.map((model) => ({ displayName: publicName(model) })))
+const displayName = computed(() => selected.value ? publicName(selected.value) : '请选择档位')
 const imageCosts = computed(() => Object.entries((selected.value && selected.value.beanCosts) || {})
 	.filter(([, beans]) => beans != null && String(beans).trim() !== '' && Number.isFinite(Number(beans)) && Number(beans) >= 0))
 const pricingSummary = computed(() => {
@@ -58,7 +62,7 @@ function showPricing() {
 	if (!selected.value) return
 	uni.showModal({
 		title: `${props.label}计费说明`,
-		content: `${selected.value.modelName}\n\n${pricing.value}`,
+		content: `${displayName.value}\n\n${pricing.value}`,
 		showCancel: false,
 		confirmText: '知道了',
 		confirmColor: '#4f76ad',

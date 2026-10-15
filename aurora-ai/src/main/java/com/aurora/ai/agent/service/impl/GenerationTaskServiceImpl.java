@@ -7,6 +7,7 @@ import com.aurora.ai.agent.domain.GenerationTask;
 import com.aurora.ai.agent.dto.GenerateImageItem;
 import com.aurora.ai.agent.service.ImagePromptCompiler;
 import com.aurora.ai.agent.dto.GenerationOptionsVO;
+import com.aurora.ai.agent.dto.PublicModelTier;
 import com.aurora.ai.agent.dto.WorkBatchDetailVO;
 import com.aurora.ai.agent.dto.WorkBatchItemVO;
 import com.aurora.ai.agent.dto.WorkItemDetailVO;
@@ -316,8 +317,7 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
         }
         GenerationOptionsVO result = new GenerationOptionsVO(supported, defaultResolution, beanCosts);
         result.setModelId(model.getId());
-        result.setModelName(model.getModelName());
-        result.setProvider(model.getProvider());
+        result.setModelName(PublicModelTier.nameOf(model));
         result.setAspectRatios(MobileModelCatalogService.csv(model.getSupportedAspectRatios()));
         result.setSupportsReferenceImages(MobileModelCatalogService.supportsReferences(model.getProvider()));
         result.setMaxReferenceImages(result.isSupportsReferenceImages() ? 9 : 0);

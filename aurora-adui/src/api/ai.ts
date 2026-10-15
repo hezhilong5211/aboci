@@ -173,6 +173,7 @@ export interface SysAiModel {
   imageQuality?: string;
   id?: number;
   modelName: string;
+  displayTier?: '轻' | '中' | '高';
   apiKey: string;
   // SecretKey,仅可灵等双密钥模型
   secretKey?: string;
