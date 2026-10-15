@@ -10,6 +10,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,7 +29,9 @@ public class MobileModelCatalogService {
                 .orderByAsc(SysAiModel::getId));
         List<MobileModelVO> available = active.stream().filter(MobileModelCatalogService::configured)
                 .filter(model -> !"image".equals(model.getModelType()) || supportsImageProvider(model.getProvider()))
-                .map(this::toPublicModel).toList();
+                .map(this::toPublicModel)
+                .sorted(Comparator.comparingInt(model -> tierOrder(model.getDisplayTier())))
+                .toList();
         return Map.of("chatModels", available.stream().filter(model -> "chat".equals(model.getModelType())).toList(),
                 "imageModels", available.stream().filter(model -> "image".equals(model.getModelType())).toList());
     }
@@ -44,6 +47,14 @@ public class MobileModelCatalogService {
     public static List<String> csv(String value) {
         return value == null || value.isBlank() ? List.of() : Arrays.stream(value.split(","))
                 .map(String::trim).filter(item -> !item.isBlank()).distinct().toList();
+    }
+
+    private static int tierOrder(String tier) {
+        return switch (tier) {
+            case "轻" -> 0;
+            case "高" -> 2;
+            default -> 1;
+        };
     }
 
     private static boolean configured(SysAiModel model) {
