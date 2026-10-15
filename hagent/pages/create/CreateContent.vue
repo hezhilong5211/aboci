@@ -32,7 +32,7 @@
 							class="prompt-input"
 							v-model="promptText"
 							:maxlength="PROMPT_MAX_LENGTH"
-						placeholder="描述你想要的发型海报，越具体越好…"
+						placeholder="描述你想要的图片，越具体越好…"
 						placeholder-class="prompt-placeholder"
 						:show-confirm-bar="false"
 						:adjust-position="false"

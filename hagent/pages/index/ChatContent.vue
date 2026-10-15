@@ -5,7 +5,6 @@
 			v-if="!hasMessages"
 			class="empty-state"
 		>
-			<text class="empty-kicker">AI 美业创作</text>
 			<view class="empty-title">
 				<text class="empty-line">今天，</text>
 				<text class="empty-line">想创作些<text class="empty-accent">什么</text>？</text>
@@ -2357,17 +2356,9 @@ onBeforeUnmount(() => {
 	pointer-events: none;
 }
 
-.empty-kicker {
-	font-size: 24rpx;
-	letter-spacing: 6rpx;
-	color: #8fa8dc;
-	line-height: 1;
-}
-
 .empty-title {
 	display: flex;
 	flex-direction: column;
-	margin-top: 32rpx;
 }
 
 .empty-line {
