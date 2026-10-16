@@ -38,11 +38,11 @@ function fn(name) {
 	assert.ok(node, `missing ${name}`)
 	return script.slice(node.start, node.end)
 }
-const events = [], streams = new Map(), polls = []
+const events = [], streams = new Map(), polls = [], clearedSyncs = []
 const ctx = vm.createContext({ conversationStore: store, disposed: false, sessionEpoch: 0, streams, uni,
 	isCurrentSession: (id) => String(store.conversationId) === String(id), followLatestIfNearBottom: () => events.push('scroll'),
 	refreshBalance: () => events.push('balance'), startConversationSync: (id) => polls.push(id), selectedClarificationOptionId: ref(''),
-	startResultPolling() {}, clearConversationSync() {}, goRecharge() {}, stopChat: async (id) => events.push(`stop:${id}`),
+	startResultPolling() {}, clearConversationSync: (id) => clearedSyncs.push(id), goRecharge() {}, stopChat: async (id) => events.push(`stop:${id}`),
 	ACTIVE_RUN_STATES: new Set(['QUEUED', 'RUNNING', 'GENERATING']), fullUrl: (url) => url,
 })
 for (const name of ['sameId', 'safeParse', 'hasGenerationTasks', 'buildResult', 'mergeResultData', 'mergeTool', 'finishStream', 'createStreamHandlers', 'handleStop', 'markTaskImages', 'applyGenerationTaskSnapshot', 'applyRunSnapshot']) vm.runInContext(fn(name), ctx)
@@ -82,6 +82,44 @@ await check('HTTP 失败先恢复服务端任务状态，不误解锁或干扰�
 	ctx.createStreamHandlers(ai, { conversationId: 1, requestId: 'A-error' }).onError({ type: 'error', message: '模型不可用' })
 	assert.equal(s.transportError, '模型不可用'); assert.equal(s.recovering, true); assert.equal(polls.at(-1), 1)
 	assert.equal(store.conversationId, 2)
+})
+await check('明确超长拒绝立即结束本次流并提示新建，不轮询旧任务也不干扰其他会话', () => {
+	const s = store.getSession(1); s.requestId = 'A-too-long'; s.streaming = true; s.recovering = true; s.activeMessageId = 'A-too-long'
+	s.transportError = 'previous transport error'
+	s.pendingResumeTask = { conversationId: 1, sourceMessageId: 101, ready: true }
+	const other = store.getSession(2); other.requestId = 'B-live'; other.streaming = true; other.status = 'RUNNING'
+	other.pendingResumeTask = { conversationId: 2, sourceMessageId: 202, ready: true }
+	const otherStream = { abort() { throw Error('other session must continue') } }
+	streams.set('1', {}); streams.set('2', otherStream)
+	const ai = { text: '', thinking: '', result: null, tools: [], queueMessage: '正在排队' }
+	const pollCount = polls.length
+	ctx.createStreamHandlers(ai, { conversationId: 1, requestId: 'A-too-long' }).onError({
+		type: 'error', errorCode: 'CONVERSATION_TOO_LONG', action: 'NEW_CONVERSATION', message: '请新建对话继续，原记录保留',
+	})
+	assert.equal(s.status, 'FAILED'); assert.equal(s.streaming, false); assert.equal(s.recovering, false)
+	assert.equal(s.activeMessageId, null); assert.equal(s.transportError, ''); assert.equal(ai.queueMessage, '')
+	assert.equal(s.pendingResumeTask, null)
+	assert.equal(ai.text, '请新建对话继续，原记录保留'); assert.equal(ai.newConversationRequired, true)
+	assert.equal(polls.length, pollCount); assert.equal(clearedSyncs.at(-1), 1); assert.equal(streams.has('1'), false)
+	assert.equal(store.conversationId, 2); assert.equal(other.streaming, true); assert.equal(other.status, 'RUNNING')
+	assert.equal(other.pendingResumeTask.sourceMessageId, 202); assert.equal(other.pendingResumeTask.ready, true)
+	assert.equal(streams.get('2'), otherStream)
+	assert.match(chat, /v-if="msg\.newConversationRequired"[\s\S]*?@tap="onHistoryNew">新建对话/)
+	assert.match(chat, /新会话请重新选择参考图并描述需求/)
+})
+await check('缺少明确超长错误契约时仍核对后台状态，不根据提示文案停止恢复', () => {
+	for (const event of [
+		{ message: '请新建对话继续，原记录保留' },
+		{ errorCode: 'CONVERSATION_TOO_LONG', action: 'RETRY', message: '暂时失败' },
+		{ errorCode: 'OTHER_ERROR', action: 'NEW_CONVERSATION', message: '暂时失败' },
+	]) {
+		const s = store.getSession(1); s.requestId = 'A-uncertain'; s.streaming = true; s.recovering = false
+		const ai = { text: '', thinking: '', result: null, tools: [] }
+		const pollCount = polls.length
+		ctx.createStreamHandlers(ai, { conversationId: 1, requestId: 'A-uncertain' }).onError(event)
+		assert.equal(s.recovering, true); assert.equal(polls.length, pollCount + 1)
+		assert.equal(ai.newConversationRequired, undefined)
+	}
 })
 await check('SSE 正常结束仅完成一次；HTTP 拒绝和断流触发错误恢复', () => {
 	let request, onChunk

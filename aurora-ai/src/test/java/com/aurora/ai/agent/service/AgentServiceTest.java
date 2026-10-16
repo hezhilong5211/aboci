@@ -62,6 +62,39 @@ import static org.mockito.Mockito.when;
 class AgentServiceTest {
 
     @Test
+    void oversizedConversationIsRejectedBeforeRunMessagesModelsOrBilling() throws Exception {
+        SysAiModelMapper models = mock(SysAiModelMapper.class);
+        IConversationService conversations = mock(IConversationService.class);
+        IMessageService messages = mock(IMessageService.class);
+        IGenerationTaskService images = mock(IGenerationTaskService.class);
+        ResponsesApiClient responses = mock(ResponsesApiClient.class);
+        IBeanDeductPort beans = mock(IBeanDeductPort.class);
+        ChatRunService runs = mock(ChatRunService.class);
+        ConversationCapacityService capacity = mock(ConversationCapacityService.class);
+        AgentService service = new AgentService(models, conversations, messages,
+                mock(IMessageAttachmentService.class), mock(IReferenceScopeService.class), images,
+                mock(PromptAssembler.class), mock(ProfileStorage.class), mock(EncryptUtils.class), new ObjectMapper(),
+                new BillingCalculator(), responses, new ApiRateLimiter(50, 300, 3000));
+        ReflectionTestUtils.setField(service, "chatRunService", runs);
+        ReflectionTestUtils.setField(service, "conversationCapacityService", capacity);
+        ReflectionTestUtils.setField(service, "beanDeductPort", beans);
+        Conversation conversation = new Conversation(); conversation.setId(11L);
+        when(conversations.getOwned(11L, 7L)).thenReturn(conversation);
+        doThrow(new ConversationLimitException()).when(capacity).requireCapacity(7L, 11L);
+        AgentChatRequest request = new AgentChatRequest();
+        request.setConversationId(11L); request.setRequestId("long-chat-rejected"); request.setMessage("继续出图");
+
+        List<String> events = service.chatStream(7L, request).collectList().block(Duration.ofSeconds(2));
+
+        assertEquals(1, events.size());
+        JsonNode event = new ObjectMapper().readTree(events.get(0));
+        assertEquals("CONVERSATION_TOO_LONG", event.path("errorCode").asText());
+        assertEquals("NEW_CONVERSATION", event.path("action").asText());
+        verify(runs, never()).reserve(anyLong(), anyLong(), anyString(), anyString(), any(), any(), any());
+        verifyNoInteractions(models, messages, images, responses, beans);
+    }
+
+    @Test
     void writesAtomicActualDebitWhenAnotherConversationHasConsumedPartOfBalance() throws Exception {
         IMessageService messages = mock(IMessageService.class);
         IBeanDeductPort beans = mock(IBeanDeductPort.class);

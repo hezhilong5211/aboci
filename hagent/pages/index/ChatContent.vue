@@ -102,6 +102,11 @@
 									<text class="recharge-recovery-action" @tap="goRecharge">去充值</text>
 								</view>
 
+								<view v-if="msg.newConversationRequired" class="conversation-limit-recovery">
+									<text class="conversation-limit-hint">原记录仍保留；新会话请重新选择参考图并描述需求。</text>
+									<text class="conversation-limit-action" @tap="onHistoryNew">新建对话</text>
+								</view>
+
 								<!-- 结果分段卡 -->
 									<ResultCard
 										v-if="msg.result"
@@ -1854,6 +1859,22 @@ function createStreamHandlers(ai, streamPayload) {
 			refreshBalance()
 		}),
 		onError: guarded((event) => {
+			if (event?.errorCode === 'CONVERSATION_TOO_LONG' && event.action === 'NEW_CONVERSATION') {
+				// The server rejected this request before creating a run. Polling would read an older run.
+				finishStream(id, streamPayload.requestId)
+				clearConversationSync(id)
+				conversationStore.clearPendingResumeTask(id)
+				session.status = 'FAILED'
+				session.recovering = false
+				session.activeMessageId = null
+				session.transportError = ''
+				ai.queueMessage = ''
+				ai.text = event.message || '这段对话内容较多，请新建对话继续。历史记录和图片仍可查看。'
+				ai.newConversationRequired = true
+				conversationStore.persist()
+				follow()
+				return
+			}
 			const recharge = event?.errorCode === 'INSUFFICIENT_BEANS' && event.action === 'RECHARGE'
 			if (recharge && ai.sourceMessageId != null) conversationStore.setPendingResumeTask({
 				conversationId: id, sourceMessageId: ai.sourceMessageId, modelId: streamPayload.modelId,
@@ -2314,6 +2335,9 @@ onBeforeUnmount(() => {
 .recharge-recovery { display: flex; align-items: center; gap: 20rpx; margin-top: 18rpx; }
 .recharge-recovery-hint { font-size: 24rpx; color: #8792a5; }
 .recharge-recovery-action { font-size: 26rpx; color: #477ede; padding: 10rpx 20rpx; background: #eef4ff; border-radius: 24rpx; }
+.conversation-limit-recovery { display: flex; flex-direction: column; align-items: flex-start; gap: 16rpx; margin-top: 20rpx; }
+.conversation-limit-hint { font-size: 24rpx; line-height: 1.6; color: #8792a5; }
+.conversation-limit-action { padding: 14rpx 28rpx; font-size: 26rpx; line-height: 1.4; color: #477ede; background: #eef4ff; border-radius: 24rpx; }
 
 .chat-content {
 	height: 100%;

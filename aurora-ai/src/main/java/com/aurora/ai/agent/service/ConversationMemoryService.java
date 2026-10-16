@@ -120,7 +120,7 @@ public class ConversationMemoryService {
                 .gt(Message::getId, memory.getCoveredMessageId()).lt(Message::getId, boundary)
                 .orderByAsc(Message::getId).last("LIMIT 501"));
         if (remainder.size() > 500 || textSize(remainder) + textSize(recent) > recentChars + inputChars) {
-            throw new ServiceException("对话记忆整理暂时失败，请稍后重试，历史内容已保留");
+            throw new ConversationLimitException();
         }
         uncompressed.clear();
         uncompressed.addAll(remainder);

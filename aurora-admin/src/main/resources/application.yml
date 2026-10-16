@@ -91,6 +91,10 @@ ai:
       zone: '${AI_GENERATED_IMAGE_CLEANUP_ZONE:Asia/Shanghai}'
       max-tasks-per-run: ${AI_GENERATED_IMAGE_CLEANUP_MAX_TASKS:2000}
   conversation:
+    # Stop growing oversized chats; keep existing records and guide the user to a new conversation.
+    max-messages: ${AI_CONVERSATION_MAX_MESSAGES:200}
+    max-characters: ${AI_CONVERSATION_MAX_CHARACTERS:100000}
+    max-image-index-characters: ${AI_CONVERSATION_MAX_IMAGE_INDEX_CHARACTERS:60000}
     retention-days: ${AI_CONVERSATION_RETENTION_DAYS:30}
     cleanup:
       enabled: ${AI_CONVERSATION_CLEANUP_ENABLED:true}

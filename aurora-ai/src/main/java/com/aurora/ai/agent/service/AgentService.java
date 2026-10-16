@@ -150,6 +150,9 @@ public class AgentService {
     @Autowired(required = false)
     private ConversationMemoryService memoryService;
 
+    @Autowired(required = false)
+    private ConversationCapacityService conversationCapacityService;
+
     /**
      * 豆子扣减端口(跨模块 SPI):由 aurora-admin 的 BeanDeductAdapter 实现。
      * 可选注入:为 null 时计费降级跳过(仅 log.warn),不阻断对话/出图。
@@ -221,6 +224,11 @@ public class AgentService {
                 }
                 Conversation conversation = resolveConversation(userId, req);
                 req.setConversationId(conversation.getId());
+                // Existing request replay above remains available; new work on an oversized chat is rejected
+                // before reserving a run, saving another message, calling a model or charging beans.
+                if (conversationCapacityService != null) {
+                    conversationCapacityService.requireCapacity(userId, conversation.getId());
+                }
                 ChatRun resumed = chatRunService.findSource(userId, req.getResumeMessageId());
                 SysAiModel model = resumed == null ? resolveChatModel(req.getModelId())
                         : aiModelMapper.selectById(resumed.getModelId());
@@ -237,6 +245,9 @@ public class AgentService {
                 activeRun.chatModel = chatRunService.applyBillingSnapshot(activeRun.persisted, model);
                 req.setModelId(activeRun.persisted.getModelId());
                 req.setImageModelId(activeRun.persisted.getImageModelId());
+            } catch (ConversationLimitException e) {
+                return Flux.just(AgentSseEvent.error(e.getMessage(), ConversationLimitException.CODE,
+                        ConversationLimitException.ACTION).toJsonLine());
             } catch (ServiceException e) {
                 return Flux.just(AgentSseEvent.error(e.getMessage()).toJsonLine());
             }
@@ -693,7 +704,10 @@ public class AgentService {
                     log.warn("中断结算扣豆失败: userId={}, messageId={}, err={}", userId, messageId, ex.getMessage());
                 }
             }
-            if (e instanceof InsufficientBeanException) {
+            if (e instanceof ConversationLimitException) {
+                emit(sink, AgentSseEvent.error(failureMessage, ConversationLimitException.CODE,
+                        ConversationLimitException.ACTION));
+            } else if (e instanceof InsufficientBeanException) {
                 emit(sink, AgentSseEvent.error(
                         "豆子余额不足,充值后可返回继续生成~",
                         "INSUFFICIENT_BEANS", "RECHARGE"));
