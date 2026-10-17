@@ -11,6 +11,7 @@ import com.aurora.ai.agent.dto.ClaimedReferenceScope;
 import com.aurora.ai.agent.dto.AgentChatRequest;
 import com.aurora.ai.agent.dto.AgentImageInput;
 import com.aurora.ai.agent.dto.AgentResumeRequest;
+import com.aurora.ai.agent.dto.ChatRunVO;
 import com.aurora.ai.agent.dto.GenerateImageItem;
 import com.aurora.ai.domain.SysAiModel;
 import com.aurora.ai.mapper.SysAiModelMapper;
@@ -33,6 +34,7 @@ import com.aurora.ai.agent.domain.ChatRun;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.nio.file.Path;
+import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -301,7 +303,7 @@ class AgentServiceTest {
             assertTrue(events.stream().anyMatch(event -> event.contains("生图计划未通过校验")));
             // 即使客户端没有收到 SSE error，历史轮询也能读到终态并解除输入锁定。
             verify(messageService).saveMessage(eq(11L), eq(7L), eq("assistant"),
-                    eq("生图计划未通过校验，本次未提交图片，请重试。"), eq("text"),
+                    eq("生图计划未通过校验，本次未提交图片，请重试。\n" + ChatFailureAdvice.CONTINUE_MESSAGE), eq("text"),
                     isNull(), isNull(), isNull());
         } else {
             ArgumentCaptor<List<GenerateImageItem>> itemsCaptor = ArgumentCaptor.forClass(List.class);
@@ -1074,7 +1076,7 @@ class AgentServiceTest {
         if (!failUpstream) assertFalse(service.stopChat(7L, 21L));
         assertEquals(1L, otherCompleted.getCount());
         assertTrue(otherEvents.stream().noneMatch(event -> event.contains("\"type\":\"done\"")));
-        assertEquals(failUpstream ? "对话出错了,请稍后重试" : "对话已停止",
+        assertEquals(failUpstream ? ChatFailureAdvice.FAILED_MESSAGE : "对话已停止",
                 objectMapper.readTree(stoppedMessage.getContent()).path("body").asText());
         assertEquals("task-1", objectMapper.readTree(stoppedMessage.getMedia()).get(0).path("taskId").asText());
         otherCanFinish.countDown();
@@ -1127,7 +1129,7 @@ class AgentServiceTest {
         when(messageService.saveUserMessage(eq(11L), eq(7L), anyString(), isNull(), any()))
                 .thenReturn(userMessage);
         CountDownLatch assistantSaved = new CountDownLatch(1);
-        String expectedReply = failUpstream ? "对话出错了,请稍后重试" : "完成";
+        String expectedReply = failUpstream ? ChatFailureAdvice.FAILED_MESSAGE : "完成";
         when(messageService.saveMessage(eq(11L), eq(7L), eq("assistant"), eq(expectedReply), eq("text"),
                 isNull(), isNull(), isNull())).thenAnswer(invocation -> {
                     assistantSaved.countDown();
@@ -1500,6 +1502,126 @@ class AgentServiceTest {
                         Path.of("target/test-agent-queue-home").toString()),
                 mock(EncryptUtils.class), new ObjectMapper(), new BillingCalculator(),
                 mock(ResponsesApiClient.class), limiter);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void upstreamTimeoutOffersNewChatAndPreservesSubmittedImagesWithoutRetry(boolean submittedImages) throws Exception {
+        SysAiModelMapper models = mock(SysAiModelMapper.class);
+        IConversationService conversations = mock(IConversationService.class);
+        IMessageService messages = mock(IMessageService.class);
+        IGenerationTaskService images = mock(IGenerationTaskService.class);
+        PromptAssembler prompts = mock(PromptAssembler.class);
+        EncryptUtils encrypt = mock(EncryptUtils.class);
+        ResponsesApiClient responses = mock(ResponsesApiClient.class);
+        IBeanDeductPort beans = mock(IBeanDeductPort.class);
+        ObjectMapper json = new ObjectMapper();
+        AgentService service = new AgentService(models, conversations, messages,
+                mock(IMessageAttachmentService.class), mock(IReferenceScopeService.class), images, prompts,
+                mock(ProfileStorage.class), encrypt, json, new BillingCalculator(), responses,
+                new ApiRateLimiter(50, 300, 3000));
+        ReflectionTestUtils.setField(service, "beanDeductPort", beans);
+        ReflectionTestUtils.setField(service, "minTextBeans", 1L);
+        ChatRunService runs = mock(ChatRunService.class);
+        ReflectionTestUtils.setField(service, "chatRunService", runs);
+        ChatRun persisted = new ChatRun();
+        persisted.setId(1L); persisted.setStatus("RUNNING"); persisted.setModelId(9L);
+        persisted.setConversationId(11L); persisted.setUserId(7L);
+        persisted.setText(""); persisted.setThinking("内部思考不应进入历史正文");
+        when(runs.reserve(anyLong(), anyLong(), anyString(), anyString(), any(), any(), any(), any()))
+                .thenReturn(new ChatRunService.Reservation(persisted, true));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            com.aurora.ai.dto.AgentSseEvent event = invocation.getArgument(1);
+            if ("text".equals(event.getType())) persisted.setText(persisted.getText() + event.getContent());
+            return null;
+        }).when(runs).observe(eq(persisted), any());
+        Conversation conversation = new Conversation(); conversation.setId(11L);
+        when(conversations.getOwned(11L, 7L)).thenReturn(conversation);
+        Message user = new Message(); user.setId(21L); user.setContent("生成1张图");
+        when(messages.saveUserMessage(eq(11L), eq(7L), anyString(), isNull(), any())).thenReturn(user);
+        when(messages.recentForContext(11L, 11)).thenReturn(List.of(user));
+        SysAiModel model = responsesModel();
+        when(runs.applyBillingSnapshot(persisted, model)).thenReturn(model);
+        when(models.selectOne(any(Wrapper.class))).thenReturn(model);
+        when(encrypt.decrypt("encrypted")).thenReturn("key");
+        when(beans.getBalance(7L)).thenReturn(50L);
+        when(prompts.assembleSystemPrompt(eq(7L), isNull(), anyString()))
+                .thenReturn(new PromptAssembler.AssembledPrompt("系统提示词", false));
+        var stream = when(responses.streamRound(eq(model), eq("key"), any(), any(), any(), any()));
+        org.mockito.stubbing.Answer<ResponsesApiClient.Round> failAfterPartialText = invocation -> {
+            java.util.function.Consumer<String> text = invocation.getArgument(4);
+            text.accept("已经完成参考图分析。正在继续校验服装和发型的原始细节与构图要求");
+            throw new HttpTimeoutException("request timed out");
+        };
+        if (submittedImages) {
+            stream.thenReturn(toolRound(json, "call-1", imagePlanArguments(json, 1, 1)))
+                    .thenAnswer(failAfterPartialText);
+            when(images.submitImageBatch(eq(7L), eq(11L), eq(21L), any(), isNull(), isNull(), any(), isNull(), anyString()))
+                    .thenReturn("already-submitted");
+        } else {
+            stream.thenAnswer(failAfterPartialText);
+        }
+        AgentChatRequest request = new AgentChatRequest();
+        request.setConversationId(11L); request.setMessage("生成1张图");
+
+        List<String> events = service.chatStream(7L, request).collectList().block(Duration.ofSeconds(5));
+
+        var error = events.stream().map(value -> {
+            try { return json.readTree(value); } catch (Exception e) { throw new RuntimeException(e); }
+        }).filter(value -> "error".equals(value.path("type").asText())).findFirst().orElseThrow();
+        assertEquals("CHAT_MODEL_TIMEOUT", error.path("errorCode").asText());
+        assertEquals("NEW_CONVERSATION", error.path("action").asText());
+        assertEquals(ChatFailureAdvice.TIMEOUT_MESSAGE, error.path("message").asText());
+        verify(responses, times(submittedImages ? 2 : 1))
+                .streamRound(eq(model), eq("key"), any(), any(), any(), any());
+        ArgumentCaptor<String> content = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> media = ArgumentCaptor.forClass(String.class);
+        verify(messages).saveMessage(eq(11L), eq(7L), eq("assistant"), content.capture(),
+                eq(submittedImages ? "structured" : "text"), media.capture(), isNull(), isNull());
+        assertTrue(content.getValue().contains("响应超时"));
+        assertTrue(content.getValue().contains("已经完成参考图分析。"));
+        assertFalse(content.getValue().contains("内部思考不应进入历史正文"));
+        if (submittedImages) {
+            assertEquals("already-submitted", json.readTree(media.getValue()).get(0).path("taskId").asText());
+            verify(images, times(1)).submitImageBatch(eq(7L), eq(11L), eq(21L), any(), isNull(), isNull(), any(), isNull(), anyString());
+        } else {
+            verify(images, never()).submitImageBatch(anyLong(), anyLong(), anyLong(), any(), any(), any(), any(), any(), any());
+            verify(beans, never()).deduct(anyLong(), anyLong(), anyString(), anyString());
+            verify(beans, never()).deductUpToBalance(anyLong(), anyLong(), anyString(), anyString());
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"FAILED,CHAT_MODEL_TIMEOUT,NEW_CONVERSATION", "WAITING_RECHARGE,INSUFFICIENT_BEANS,RECHARGE"})
+    void duplicateRequestReplaysFailureActionWithoutExecutingAgain(String status, String code, String action) throws Exception {
+        ChatRunService runs = mock(ChatRunService.class);
+        IConversationService conversations = mock(IConversationService.class);
+        IMessageService messages = mock(IMessageService.class);
+        ResponsesApiClient responses = mock(ResponsesApiClient.class);
+        IGenerationTaskService images = mock(IGenerationTaskService.class);
+        AgentService service = new AgentService(mock(SysAiModelMapper.class), conversations, messages,
+                mock(IMessageAttachmentService.class), mock(IReferenceScopeService.class), images,
+                mock(PromptAssembler.class), mock(ProfileStorage.class), mock(EncryptUtils.class), new ObjectMapper(),
+                new BillingCalculator(), responses, new ApiRateLimiter(50, 300, 3000));
+        ReflectionTestUtils.setField(service, "chatRunService", runs);
+        ChatRun persisted = new ChatRun(); persisted.setConversationId(11L); persisted.setUserId(7L);
+        when(runs.findRequest(7L, "retry-existing")).thenReturn(persisted);
+        when(conversations.getOwned(11L, 7L)).thenReturn(new Conversation());
+        ChatRunVO snapshot = new ChatRunVO();
+        snapshot.setStatus(status); snapshot.setConversationId(11L); snapshot.setMessageId(21L);
+        snapshot.setRunId("retry-existing"); snapshot.setRequestId("retry-existing");
+        snapshot.setErrorCode(code); snapshot.setAction(action); snapshot.setErrorMessage("失败提示");
+        when(runs.toView(persisted)).thenReturn(snapshot);
+        AgentChatRequest request = new AgentChatRequest();
+        request.setConversationId(11L); request.setRequestId("retry-existing"); request.setMessage("原请求");
+
+        List<String> events = service.chatStream(7L, request).collectList().block(Duration.ofSeconds(2));
+        JsonNode error = new ObjectMapper().readTree(events.get(1));
+        assertEquals("error", error.path("type").asText());
+        assertEquals(code, error.path("errorCode").asText());
+        assertEquals(action, error.path("action").asText());
+        verifyNoInteractions(messages, responses, images);
+        verify(runs, never()).reserve(anyLong(), anyLong(), anyString(), anyString(), any(), any(), any(), any());
     }
 
     private SysAiModel responsesModel() {

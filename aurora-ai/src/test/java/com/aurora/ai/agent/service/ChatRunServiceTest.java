@@ -177,6 +177,47 @@ class ChatRunServiceTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"FAILED", "INTERRUPTED", "WAITING_RECHARGE"})
+    void failureActionSurvivesReloadWhileAlreadySubmittedImagesKeepRunning(String outcome) {
+        ChatRun run = run("RUNNING");
+        run.setCompletionStatus(outcome);
+        run.setErrorMessage("WAITING_RECHARGE".equals(outcome)
+                ? "豆子余额不足" : ChatFailureAdvice.TIMEOUT_MESSAGE);
+        GenerationTask task = new GenerationTask();
+        task.setTaskId("submitted-before-failure");
+        task.setStatus("RUNNING");
+        when(generations.listBySourceMessage(7L, 11L, 21L)).thenReturn(List.of(task));
+        when(mapper.selectOne(any())).thenReturn(run);
+
+        service.finish(run, outcome);
+        var snapshot = service.getOwned(7L, 11L);
+        assertEquals("GENERATING", snapshot.getStatus());
+        assertEquals("WAITING_RECHARGE".equals(outcome) ? "RECHARGE" : "NEW_CONVERSATION", snapshot.getAction());
+        assertEquals("FAILED".equals(outcome) ? "CHAT_MODEL_TIMEOUT"
+                : "INTERRUPTED".equals(outcome) ? "CHAT_INTERRUPTED" : "INSUFFICIENT_BEANS", snapshot.getErrorCode());
+        assertEquals("submitted-before-failure", snapshot.getGenerationTasks().getFirst().getTaskId());
+
+        task.setStatus("SUCCEEDED");
+        var finished = service.getOwned(7L, 11L);
+        assertEquals(outcome, finished.getStatus());
+        assertEquals(snapshot.getAction(), finished.getAction());
+        verify(generations, never()).submitImageBatch(anyLong(), anyLong(), anyLong(), any(), any(), any(), any());
+    }
+
+    @Test
+    void cancelledClarificationIsNotRestoredAfterOrchestrationFailure() {
+        ChatRun run = run("GENERATING");
+        run.setCompletionStatus("FAILED");
+        run.setErrorMessage(ChatFailureAdvice.FAILED_MESSAGE);
+        run.setClarificationJson("{\"scopeId\":\"already-cancelled\",\"question\":\"请选择\"}");
+        assertNull(service.toView(run).getClarification());
+        run.setStatus("WAITING_CONFIRMATION");
+        run.setCompletionStatus("WAITING_CONFIRMATION");
+        run.setErrorMessage(null);
+        assertEquals("already-cancelled", service.toView(run).getClarification().getScopeId());
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"CANCELLED", "FAILED", "INTERRUPTED", "WAITING_CONFIRMATION"})
     void unfinishedImagesKeepRunBusyAndRestoreOriginalTextOutcomeAfterImagesFinish(String outcome) {
         ChatRun run = run("RUNNING");

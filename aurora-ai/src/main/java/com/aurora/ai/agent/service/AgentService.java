@@ -296,7 +296,9 @@ public class AgentService {
         if (StringUtils.hasText(snapshot.getText())) events.add(AgentSseEvent.text(snapshot.getText()).toJsonLine());
         if (snapshot.getResult() != null) events.add(AgentSseEvent.result(snapshot.getResult()).toJsonLine());
         if (snapshot.getClarification() != null) events.add(AgentSseEvent.clarification(snapshot.getClarification()).toJsonLine());
-        if (StringUtils.hasText(snapshot.getErrorMessage())) events.add(AgentSseEvent.error(snapshot.getErrorMessage()).toJsonLine());
+        if (StringUtils.hasText(snapshot.getErrorMessage())) {
+            events.add(AgentSseEvent.error(snapshot.getErrorMessage(), snapshot.getErrorCode(), snapshot.getAction()).toJsonLine());
+        }
         events.add(AgentSseEvent.done().toJsonLine());
         return Flux.fromIterable(events);
     }
@@ -476,6 +478,7 @@ public class AgentService {
         SysAiModel chatModel = null;
         Long messageId = null;
         boolean settled = false;
+        boolean orchestrationStarted = false;
         List<AgentResult.ImageRef> collectedImages = new ArrayList<>();
         ToolExecutionState toolState = new ToolExecutionState();
         toolState.imageModelId = req.getImageModelId();
@@ -577,6 +580,7 @@ public class AgentService {
             }
 
             // 2. 系统提示词:三层 + 运行时上下文(直接生成规则 + 当前图片编号)
+            orchestrationStarted = true;
             // 当前 user 已先入库，额外取一条后再按 id 排除，确保真正保留最多 10 条历史消息。
             List<Message> recent = referenceContext.continued()
                     ? List.of()
@@ -706,13 +710,16 @@ public class AgentService {
             // SSE 可能早已断开；普通失败必须可从历史恢复，不能只发送实时错误。
             log.error("Agent 编排失败: userId={}, conversationId={}", userId,
                     conversation == null ? null : conversation.getId(), e);
-            String failureMessage = e instanceof ServiceException && StringUtils.hasText(e.getMessage())
-                    ? e.getMessage() : "对话出错了,请稍后重试";
+            ChatFailureAdvice advice = ChatFailureAdvice.fromFailure(e, orchestrationStarted);
+            String failureMessage = advice.message();
             // 余额不足仍沿用“最后一条为 user”的充值续跑契约。
             if (!settled && !(e instanceof InsufficientBeanException) && conversation != null && messageId != null) {
                 try {
-                    Message failure = persistAssistant(conversation.getId(), userId, failureMessage,
-                            terminationResult(failureMessage, collectedImages), collectedImages, null);
+                    String partialText = activeRun.persisted == null ? null : activeRun.persisted.getText();
+                    String historyMessage = StringUtils.hasText(partialText)
+                            ? partialText + "\n\n" + failureMessage : failureMessage;
+                    Message failure = persistAssistant(conversation.getId(), userId, historyMessage,
+                            terminationResult(historyMessage, collectedImages), collectedImages, null);
                     if (chatRunService != null && failure != null) {
                         chatRunService.bindAssistant(activeRun.persisted, failure.getId());
                     }
@@ -731,16 +738,7 @@ public class AgentService {
                     log.warn("中断结算扣豆失败: userId={}, messageId={}, err={}", userId, messageId, ex.getMessage());
                 }
             }
-            if (e instanceof ConversationLimitException) {
-                emit(sink, AgentSseEvent.error(failureMessage, ConversationLimitException.CODE,
-                        ConversationLimitException.ACTION));
-            } else if (e instanceof InsufficientBeanException) {
-                emit(sink, AgentSseEvent.error(
-                        "豆子余额不足,充值后可返回继续生成~",
-                        "INSUFFICIENT_BEANS", "RECHARGE"));
-            } else {
-                emit(sink, AgentSseEvent.error(failureMessage));
-            }
+            emit(sink, AgentSseEvent.error(failureMessage, advice.errorCode(), advice.action()));
             sink.tryEmitComplete();
         } finally {
             if (messageId != null) {

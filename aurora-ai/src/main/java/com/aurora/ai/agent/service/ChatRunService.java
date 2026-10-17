@@ -177,8 +177,14 @@ public class ChatRunService {
         vo.setText(run.getText());
         vo.setThinking(run.getThinking());
         vo.setResult(parse(run.getResultJson(), AgentResult.class));
-        vo.setClarification(parse(run.getClarificationJson(), AgentClarification.class));
-        vo.setErrorMessage(run.getErrorMessage());
+        ChatFailureAdvice advice = ChatFailureAdvice.restore(run.getStatus(), run.getCompletionStatus(), run.getErrorMessage());
+        // The failed orchestration cancels its open scope; do not revive that card on reload/replay.
+        if (!ChatFailureAdvice.NEW_CONVERSATION.equals(advice.action())) {
+            vo.setClarification(parse(run.getClarificationJson(), AgentClarification.class));
+        }
+        vo.setErrorMessage(advice.message());
+        vo.setErrorCode(advice.errorCode());
+        vo.setAction(advice.action());
         vo.setUpdatedTime(run.getUpdateTime());
         vo.setGenerationTasks(tasks(run).stream().map(task -> GenerationTaskVO.from(task, objectMapper)).toList());
         return vo;

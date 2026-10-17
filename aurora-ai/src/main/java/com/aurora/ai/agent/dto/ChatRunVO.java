@@ -23,6 +23,8 @@ public class ChatRunVO {
     private AgentResult result;
     private AgentClarification clarification;
     private String errorMessage;
+    private String errorCode;
+    private String action;
     private LocalDateTime updatedTime;
     private List<GenerationTaskVO> generationTasks;
 }

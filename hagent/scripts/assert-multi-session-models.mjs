@@ -42,14 +42,14 @@ function fn(name) {
 	assert.ok(node, `missing ${name}`)
 	return script.slice(node.start, node.end)
 }
-const events = [], streams = new Map(), polls = [], clearedSyncs = []
+const events = [], streams = new Map(), polls = [], clearedSyncs = [], imagePolls = []
 const ctx = vm.createContext({ conversationStore: store, disposed: false, sessionEpoch: 0, streams, uni,
 	isCurrentSession: (id) => String(store.conversationId) === String(id), followLatestIfNearBottom: () => events.push('scroll'),
 	refreshBalance: () => events.push('balance'), startConversationSync: (id) => polls.push(id), selectedClarificationOptionId: ref(''),
-	startResultPolling() {}, clearConversationSync: (id) => clearedSyncs.push(id), goRecharge() {}, stopChat: async (id) => events.push(`stop:${id}`),
+	startResultPolling: (result) => { if (result) imagePolls.push(result) }, clearConversationSync: (id) => clearedSyncs.push(id), goRecharge() {}, stopChat: async (id) => events.push(`stop:${id}`),
 	ACTIVE_RUN_STATES: new Set(['QUEUED', 'RUNNING', 'GENERATING']), fullUrl: (url) => url,
 })
-for (const name of ['sameId', 'safeParse', 'hasGenerationTasks', 'buildResult', 'mergeResultData', 'mergeTool', 'finishStream', 'createStreamHandlers', 'handleStop', 'markTaskImages', 'applyGenerationTaskSnapshot', 'applyRunSnapshot']) vm.runInContext(fn(name), ctx)
+for (const name of ['sameId', 'safeParse', 'hasGenerationTasks', 'buildResult', 'mergeResultData', 'mergeTool', 'finishStream', 'createStreamHandlers', 'handleStop', 'markTaskImages', 'applyGenerationTaskSnapshot', 'requiresNewConversation', 'isStoredChatFailure', 'applyRunSnapshot', 'parseMediaImages', 'normalizeHistoryMessages', 'overlayMediaUrls', 'normalizeResultImages']) vm.runInContext(fn(name), ctx)
 const aiA = { text: '', thinking: '', tools: [], result: null, renderKey: 'local-assistant-A' }
 const aiB = { text: '', thinking: '', tools: [], result: null }
 store.getSession(1).requestId = 'A'; store.getSession(1).streaming = true
@@ -118,6 +118,8 @@ await check('缺少明确超长错误契约时仍核对后台状态，不根据�
 		{ message: '请新建对话继续，原记录保留' },
 		{ errorCode: 'CONVERSATION_TOO_LONG', action: 'RETRY', message: '暂时失败' },
 		{ errorCode: 'OTHER_ERROR', action: 'NEW_CONVERSATION', message: '暂时失败' },
+		{ errorCode: 'CHAT_FAILED', action: 'RETRY', message: '暂时失败' },
+		{ message: '对话出错了,请稍后重试' },
 	]) {
 		const s = store.getSession(1); s.requestId = 'A-uncertain'; s.streaming = true; s.recovering = false
 		const ai = { text: '', thinking: '', result: null, tools: [] }
@@ -126,6 +128,108 @@ await check('缺少明确超长错误契约时仍核对后台状态，不根据�
 		assert.equal(s.recovering, true); assert.equal(polls.length, pollCount + 1)
 		assert.equal(ai.newConversationRequired, undefined)
 	}
+})
+await check('明确对话失败立即提供新建入口，保留已出文字和图片并继续同步，不干扰其他会话', () => {
+	for (const errorCode of ['CHAT_FAILED', 'CHAT_MODEL_TIMEOUT', 'CHAT_INTERRUPTED']) {
+		const session = store.getSession(1); session.requestId = errorCode; session.streaming = true
+		session.pendingResumeTask = { conversationId: 1, sourceMessageId: 101, ready: true }
+		session.pendingClarification = { scopeId: 'old-scope' }
+		const other = store.getSession(2); other.streaming = true; other.requestId = 'other-active'
+		const otherStream = { abort() { throw Error('other session must remain active') } }
+		streams.set('1', {}); streams.set('2', otherStream)
+		const result = { images: [{ taskId: 'submitted-image', seq: 1, status: 'RUNNING' }] }
+		const ai = { sourceMessageId: 101, text: '已完成部分方案', thinking: '', tools: [], result,
+			clarification: { scopeId: 'old-scope' }, rechargeRequired: true }
+		const handlers = ctx.createStreamHandlers(ai, { conversationId: 1, requestId: errorCode })
+		handlers.onError({ errorCode, action: 'NEW_CONVERSATION', message: '本次对话未完成，请新建对话继续。' })
+		assert.equal(ai.text, '已完成部分方案'); assert.equal(ai.newConversationRequired, true)
+		assert.equal(ai.result, result); assert.equal(ai.result.images[0].status, 'RUNNING')
+		assert.equal(imagePolls.at(-1), result); assert.equal(polls.at(-1), 1)
+		assert.equal(session.recovering, true); assert.equal(session.streaming, false)
+		assert.equal(ai.rechargeRequired, false); assert.equal(ai.clarification, null); assert.equal(session.pendingClarification, null)
+		assert.equal(session.pendingResumeTask, null); assert.equal(streams.has('1'), false)
+		assert.equal(store.conversationId, 2); assert.equal(other.streaming, true); assert.equal(streams.get('2'), otherStream)
+		assert.match(ai.failureMessage, /新建对话/)
+	}
+})
+await check('失败快照切回与冷启动恢复新建入口，已提交图片继续更新直至完成', () => {
+	const session = store.getSession(905); session.messages = []
+	const run = { runId: 'failed-with-images', requestId: 'failed-with-images', messageId: 906,
+		status: 'GENERATING', errorCode: 'CHAT_FAILED', action: 'NEW_CONVERSATION',
+		errorMessage: '本次对话未完成，请新建对话继续。', text: '已有输出',
+		clarification: { scopeId: 'cancelled-scope', key: 'CONFIRM_IMAGE_GENERATION' },
+		generationTasks: [{ taskId: 'image-in-flight', n: 1, status: 'RUNNING', resultUrls: [] }] }
+	ctx.applyRunSnapshot(session, run)
+	const ai = session.messages[0]
+	assert.equal(ai.newConversationRequired, true); assert.equal(ai.text, '已有输出')
+	assert.equal(ai.clarification, null); assert.equal(session.pendingClarification, null)
+	assert.equal(session.recovering, true); assert.equal(['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(ai.result.images[0].status), false)
+	assert.equal(imagePolls.at(-1), ai.result)
+	ctx.applyRunSnapshot(session, { ...run, status: 'FAILED', generationTasks: [{ taskId: 'image-in-flight', n: 1, status: 'SUCCEEDED', resultUrls: ['/finished.png'] }] })
+	assert.equal(session.messages.length, 1); assert.equal(ai.newConversationRequired, true)
+	assert.equal(session.recovering, false); assert.equal(ai.result.images[0].status, 'SUCCEEDED'); assert.equal(ai.result.images[0].url, '/finished.png')
+	const cold = store.getSession(907); cold.messages = []
+	ctx.applyRunSnapshot(cold, { runId: 'cold-timeout', status: 'FAILED', errorCode: 'CHAT_MODEL_TIMEOUT', action: 'NEW_CONVERSATION' })
+	assert.equal(cold.messages[0].newConversationRequired, true)
+	ctx.applyRunSnapshot(cold, { runId: 'cold-interrupted', status: 'INTERRUPTED', errorCode: 'CHAT_INTERRUPTED', action: 'NEW_CONVERSATION' })
+	assert.equal(cold.messages[1].newConversationRequired, true)
+	assert.equal(store.conversationId, 2)
+})
+await check('旧失败历史仅识别助手纯文本整句，用户引用、解释文字和澄清卡不误判', () => {
+	const errors = ['对话出错了,请稍后重试', '对话记忆整理暂时失败，请稍后重试，历史内容已保留']
+	const records = errors.flatMap((content, index) => [
+		{ id: index * 10 + 1, role: 'assistant', contentType: 'text', content },
+		{ id: index * 10 + 2, role: 'user', contentType: 'text', content },
+		{ id: index * 10 + 3, role: 'assistant', contentType: 'text', content: `如果看到“${content}”，可以检查连接。` },
+		{ id: index * 10 + 4, role: 'assistant', contentType: 'clarification', content, media: '{"scopeId":"choice"}' },
+	])
+	const messages = ctx.normalizeHistoryMessages(records)
+	assert.deepEqual(Array.from(messages, (message) => !!message.newConversationRequired), [true, false, false, false, true, false, false, false])
+	const continuation = '可新建会话继续，旧记录和已提交图片仍保留；新会话请重新选择参考图。'
+	const modern = [`本轮对话未完成。${continuation}`, `本轮对话已中断。${continuation}`,
+		`本轮对话响应超时。${continuation}若仍超时，请稍后再试。`, `记忆整理未完成\n${continuation}`]
+	for (const content of modern) {
+		assert.equal(ctx.normalizeHistoryMessages([{ role: 'assistant', contentType: 'text', content }])[0].newConversationRequired, true)
+		const partial = ctx.normalizeHistoryMessages([{ role: 'assistant', contentType: 'text', content: `已完成的部分方案\n\n${content}` }])[0]
+		assert.equal(partial.newConversationRequired, true); assert.equal(partial.text, `已完成的部分方案\n\n${content}`)
+		assert.equal(ctx.normalizeHistoryMessages([{ role: 'user', contentType: 'text', content }])[0].newConversationRequired, undefined)
+		assert.equal(ctx.normalizeHistoryMessages([{ role: 'assistant', contentType: 'text', content: `“${content}”是一个错误提示。` }])[0].newConversationRequired, false)
+	}
+	const structured = ctx.normalizeHistoryMessages([{ role: 'assistant', contentType: 'structured',
+		content: JSON.stringify({ body: `已提交图片的部分说明\n\n${modern[0]}`, images: [{ taskId: 'saved-image', seq: 1 }] }),
+		media: JSON.stringify([{ taskId: 'saved-image', seq: 1, url: '/saved-image.png' }]),
+	}, { role: 'assistant', contentType: 'structured', content: JSON.stringify({ body: '图片制作完成', images: [] }) }])
+	assert.equal(structured[0].newConversationRequired, true); assert.equal(structured[0].result.body, `已提交图片的部分说明\n\n${modern[0]}`)
+	assert.equal(structured[0].result.images[0].taskId, 'saved-image'); assert.equal(structured[0].result.images[0].url, '/saved-image.png')
+	assert.equal(structured[1].newConversationRequired, false)
+	const session = store.getSession(908); session.messages = []
+	ctx.applyRunSnapshot(session, { runId: 'legacy', status: 'FAILED', errorMessage: errors[1] })
+	assert.equal(session.messages[0].newConversationRequired, true)
+	ctx.applyRunSnapshot(session, { runId: 'legacy', status: 'WAITING_RECHARGE', messageId: 909, errorCode: 'INSUFFICIENT_BEANS', action: 'RECHARGE', errorMessage: '豆子不足' })
+	assert.equal(session.messages[0].newConversationRequired, false); assert.equal(session.messages[0].rechargeRequired, true)
+})
+await check('带图失败历史叠加运行快照时正文和错误只显示一次，图片保留并继续轮询', () => {
+	const error = '本轮对话未完成。可新建会话继续，旧记录和已提交图片仍保留；新会话请重新选择参考图。'
+	const body = `已完成的部分方案\n\n${error}`
+	const session = store.getSession(910)
+	session.messages = ctx.normalizeHistoryMessages([{ id: 911, role: 'assistant', contentType: 'structured',
+		content: JSON.stringify({ body, images: [{ taskId: 'history-pending-image', seq: 1 }] }) }])
+	const run = { runId: 'history-failure', requestId: 'history-failure', messageId: 912, assistantMessageId: 911,
+		status: 'GENERATING', errorCode: 'CHAT_FAILED', action: 'NEW_CONVERSATION', text: '已完成的部分方案', errorMessage: error,
+		generationTasks: [{ taskId: 'history-pending-image', n: 1, status: 'RUNNING', resultUrls: [] }] }
+	ctx.applyRunSnapshot(session, run)
+	const ai = session.messages[0]
+	assert.equal(session.messages.length, 1); assert.equal(ai.text, ''); assert.equal(ai.failureMessage, '')
+	assert.equal(ai.result.body, body); assert.equal(ai.result.images.length, 1)
+	assert.equal(ai.newConversationRequired, true); assert.equal(session.recovering, true)
+	assert.equal(imagePolls.at(-1), ai.result)
+	ctx.applyRunSnapshot(session, { ...run, status: 'FAILED', generationTasks: [{ taskId: 'history-pending-image', n: 1, status: 'SUCCEEDED', resultUrls: ['/done.png'] }] })
+	assert.equal(ai.text, ''); assert.equal(ai.failureMessage, ''); assert.equal(ai.result.body, body)
+	assert.equal(ai.result.images[0].url, '/done.png')
+	// An ordinary result body must not hide independent partial text or the failure diagnostic.
+	ai.result.body = '正常图片说明'
+	ctx.applyRunSnapshot(session, run)
+	assert.equal(ai.text, '已完成的部分方案'); assert.equal(ai.failureMessage, error); assert.equal(ai.result.body, '正常图片说明')
 })
 await check('SSE 正常结束仅完成一次；HTTP 拒绝和断流触发错误恢复', () => {
 	let request, onChunk

@@ -103,7 +103,8 @@
 								</view>
 
 								<view v-if="msg.newConversationRequired" class="conversation-limit-recovery">
-									<text class="conversation-limit-hint">原记录仍保留；新会话请重新选择参考图并描述需求。</text>
+									<text v-if="msg.failureMessage" class="conversation-limit-hint">{{ msg.failureMessage }}</text>
+									<text class="conversation-limit-hint">原记录和已提交图片仍保留；新会话请重新选择参考图并描述需求。</text>
 									<text class="conversation-limit-action" @tap="onHistoryNew">新建对话</text>
 								</view>
 
@@ -1225,6 +1226,25 @@ function applyGenerationTaskSnapshot(result, task) {
 	}
 }
 
+function requiresNewConversation(error) {
+	return error?.action === 'NEW_CONVERSATION'
+		&& ['CONVERSATION_TOO_LONG', 'CHAT_MODEL_TIMEOUT', 'CHAT_FAILED', 'CHAT_INTERRUPTED'].includes(error.errorCode)
+}
+
+function isStoredChatFailure(text) {
+	// Match only complete known server diagnostics, never arbitrary user/model prose about failures.
+	const value = String(text || '').trim()
+	const continuation = '可新建会话继续，旧记录和已提交图片仍保留；新会话请重新选择参考图。'
+	const diagnostics = [
+		'对话出错了,请稍后重试', '对话出错了，请稍后重试',
+		'对话记忆整理暂时失败，请稍后重试，历史内容已保留', '对话记忆整理暂时失败，请稍后重试，历史内容已保留。',
+		`本轮对话未完成。${continuation}`, `本轮对话已中断。${continuation}`,
+		`本轮对话响应超时。${continuation}若仍超时，请稍后再试。`,
+	]
+	return diagnostics.some((diagnostic) => value === diagnostic || value.endsWith(`\n${diagnostic}`))
+		|| value.endsWith(`\n${continuation}`)
+}
+
 function applyRunSnapshot(session, run) {
 	if (!run) return
 	const running = ACTIVE_RUN_STATES.has(run.status)
@@ -1257,7 +1277,7 @@ function applyRunSnapshot(session, run) {
 		conversationStore.clearPendingResumeTask(session.conversationId)
 	}
 	let ai = session.messages.find((message) => message.renderKey === `run-${run.runId}` || message.renderKey === `local-assistant-${run.requestId}` || (message.role === 'assistant' && (sameId(message.sourceMessageId, run.messageId) || sameId(message.id, run.assistantMessageId))))
-	if (!ai && (running || rechargeRequired || run.text || run.thinking || run.result || run.errorMessage)) {
+	if (!ai && (running || rechargeRequired || run.text || run.thinking || run.result || run.errorMessage || requiresNewConversation(run))) {
 		ai = { renderKey: `run-${run.runId}`, role: 'assistant', text: '', thinking: '', tools: [], result: null }
 		session.messages.push(ai)
 		ai = session.messages[session.messages.length - 1]
@@ -1265,12 +1285,16 @@ function applyRunSnapshot(session, run) {
 	if (!ai) return
 	ai.sourceMessageId = run.messageId
 	ai.text = run.text || (rechargeRequired ? run.errorMessage || '豆子余额不足，请充值后继续' :
-		run.status === 'FAILED' || run.status === 'INTERRUPTED' ? run.errorMessage || '任务未完成，请重试' : '')
+		run.status === 'FAILED' || run.status === 'INTERRUPTED' ? run.errorMessage || (requiresNewConversation(run) ? '本次对话未完成，请新建对话继续。' : '任务未完成，请重试') : '')
 	ai.rechargeRequired = rechargeRequired
 	ai.rechargeRequestId = run.requestId || run.runId
+	ai.newConversationRequired = !rechargeRequired && (requiresNewConversation(run)
+		|| (['FAILED', 'INTERRUPTED'].includes(run.status) && isStoredChatFailure(run.errorMessage)))
+	ai.failureMessage = ai.newConversationRequired && run.errorMessage !== ai.text ? run.errorMessage || '' : ''
+	if (ai.newConversationRequired) session.pendingClarification = null
 	ai.thinking = run.thinking || ''
 	ai.queueMessage = running ? (run.status === 'QUEUED' ? '排队中，请稍候' : '任务正在后台处理') : ''
-	ai.clarification = run.clarification || null
+	ai.clarification = ai.newConversationRequired ? null : run.clarification || null
 	ai.stopped = run.status === 'CANCELLED'
 	if (run.result) ai.result = mergeResultData(ai.result, run.result)
 	for (const task of run.generationTasks || []) {
@@ -1280,6 +1304,14 @@ function applyRunSnapshot(session, run) {
 			if (!ai.result.images.some((img) => img.taskId === task.taskId && img.seq === seq)) ai.result.images.push({ taskId: task.taskId, seq })
 		}
 		applyGenerationTaskSnapshot(ai.result, task)
+	}
+	if (ai.newConversationRequired && isStoredChatFailure(ai.result?.body)) {
+		// Failure history can already contain partial text plus the diagnostic beside its images.
+		const body = String(ai.result.body).trim()
+		const text = String(ai.text || '').trim()
+		const failure = String(ai.failureMessage || '').trim()
+		if (text && (body === text || body.startsWith(`${text}\n`))) ai.text = ''
+		if (failure && (body === failure || body.endsWith(`\n${failure}`))) ai.failureMessage = ''
 	}
 	startResultPolling(ai.result)
 }
@@ -1461,6 +1493,7 @@ function normalizeHistoryMessages(list) {
 					ai.stopped = true
 				} else {
 					ai.result = parsed
+					ai.newConversationRequired = isStoredChatFailure(parsed?.body)
 					// content 里 images 仅含 {taskId,seq};后端已把 media 解析为 [{taskId,seq,url}],据此回填图 url
 					overlayMediaUrls(ai.result, safeParse(m.media))
 					normalizeResultImages(ai.result)
@@ -1472,6 +1505,7 @@ function normalizeHistoryMessages(list) {
 				ai.stopped = true
 			} else {
 				ai.text = m.content || ''
+				ai.newConversationRequired = (m.contentType == null || m.contentType === 'text') && isStoredChatFailure(ai.text)
 			}
 			result.push(ai)
 		}
@@ -1908,6 +1942,24 @@ function createStreamHandlers(ai, streamPayload) {
 				ai.queueMessage = ''
 				ai.text = event.message || '这段对话内容较多，请新建对话继续。历史记录和图片仍可查看。'
 				ai.newConversationRequired = true
+				conversationStore.persist()
+				follow()
+				return
+			}
+			if (requiresNewConversation(event)) {
+				// The chat run failed after starting; submitted image tasks still need recovery and polling.
+				finishStream(id, streamPayload.requestId)
+				conversationStore.clearPendingResumeTask(id)
+				session.transportError = ''
+				session.pendingClarification = null
+				session.recovering = true
+				ai.rechargeRequired = false
+				ai.clarification = null
+				ai.newConversationRequired = true
+				ai.failureMessage = event.message === ai.text ? '' : event.message || '本次对话未完成，请新建对话继续。'
+				ai.queueMessage = '正在同步已提交任务'
+				startResultPolling(ai.result)
+				startConversationSync(id)
 				conversationStore.persist()
 				follow()
 				return
