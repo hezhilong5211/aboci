@@ -170,11 +170,12 @@ export const useGenerationStore = defineStore('generation', () => {
 
 	/**
 	 * 案例「用此模板」带入:写入 prompt/mode/张数/画幅/参考图并置带入标记,生成页据此预填
-	 * @param {Object} payload - { prompt?, mode?, n?, aspectRatio?, resolution?, refImages? }
+	 * @param {Object} payload - { prompt?, mode?, modelId?, n?, aspectRatio?, resolution?, refImages? }
 	 */
 	function applyTemplate(payload = {}) {
 		if (payload.prompt != null) prompt.value = payload.prompt
 		if (payload.mode) mode.value = payload.mode
+		if (payload.modelId != null) modelId.value = payload.modelId
 		if (payload.n != null) params.value = { ...params.value, n: payload.n }
 		if (payload.resolution) params.value = { ...params.value, resolution: payload.resolution }
 		// 画幅非空则带入

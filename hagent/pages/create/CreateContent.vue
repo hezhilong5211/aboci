@@ -73,7 +73,7 @@
 				</view>
 
 				<!-- 输入卡外部右下:消耗提示(不伪造单价) -->
-				<text class="consume-tip">{{ consumeTip }}</text>
+				<text class="consume-tip" @tap="retryModelOptions">{{ consumeTip }}</text>
 
 				<!-- 图生图:参考图上传区 -->
 				<RefImageUploader
@@ -179,6 +179,7 @@
 <script setup>
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import ModelSelector from '@/components/common/ModelSelector.vue'
+import { imageResolutionOptions, chooseImageResolution } from '@/utils/image-resolution.js'
 import { usePerformanceMode } from '@/composables/usePerformanceMode.js'
 import { usePageScroll } from '@/composables/usePageScroll.js'
 import { useLoginGuard } from '@/composables/useLoginGuard.js'
@@ -287,18 +288,38 @@ const promptText = computed({
 // ====== 参数:比例 / 张数 / 分辨率(绑定 store.params) ======
 const ratioOptions = ref(['1:1', '3:4', '9:16', '16:9'])
 const imageModels = ref([]), modelsLoading = ref(false)
+const modelsReady = ref(false), modelsError = ref('')
+const optionsLoading = ref(false), optionsError = ref(''), optionsModelId = ref(null)
+let modelRequestVersion = 0, optionsRequestVersion = 0, createPageDisposed = false
 const selectedImageModel = computed(() => imageModels.value.find((m) => String(m.modelId) === String(generationStore.modelId)))
 const maxReferenceImages = computed(() => selectedImageModel.value?.maxReferenceImages || 9)
-function selectImageModel(id) { generationStore.setModelId(id); fetchGenerationOptions() }
+function selectImageModel(id) { generationStore.setModelId(id) }
 const countOptions = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 const resolutionOptions = ref([])
 const resolutionBeanCosts = ref({})
 const aspectRatio = computed(() => generationStore.params.aspectRatio)
 const count = computed(() => generationStore.params.n)
 const resolution = computed(() => generationStore.params.resolution || '')
+const modelConfigurationReady = computed(() => modelsReady.value && !modelsLoading.value && !optionsLoading.value
+	&& !!selectedImageModel.value && optionsModelId.value != null
+	&& String(optionsModelId.value) === String(generationStore.modelId))
+const selectedResolutionPrice = computed(() => resolutionBeanCosts.value[resolution.value])
+const modelConfigurationIssue = computed(() => {
+	if (!modelConfigurationReady.value) return ''
+	if (!resolutionOptions.value.length) return '当前档位未配置可用清晰度'
+	if (!resolutionOptions.value.includes(resolution.value)) return '请选择可用清晰度'
+	const price = selectedResolutionPrice.value
+	if (typeof price !== 'number' || !Number.isFinite(price) || price < 0) return '当前清晰度价格未配置'
+	return ''
+})
+const modelOptionsReady = computed(() => modelConfigurationReady.value && !modelConfigurationIssue.value)
 const consumeTip = computed(() => {
-	const unitPrice = Number(resolutionBeanCosts.value[resolution.value])
-	if (Number.isFinite(unitPrice)) {
+	if (modelsLoading.value || optionsLoading.value) return '正在加载出图配置，请稍候…'
+	const issue = modelsError.value || optionsError.value || modelConfigurationIssue.value
+	if (issue) return `${issue}，点击重试`
+	if (modelsReady.value && !selectedImageModel.value) return '所选出图档位不可用，请重新选择'
+	const unitPrice = selectedResolutionPrice.value
+	if (modelOptionsReady.value && typeof unitPrice === 'number' && Number.isFinite(unitPrice)) {
 		return `本次生成 ${count.value} 张 · 预计消耗 ${unitPrice * count.value} 豆`
 	}
 	return `本次生成 ${count.value} 张 · 出图后按实际结算`
@@ -313,6 +334,7 @@ const paramSheetTitle = computed(() => {
 	return '选择分辨率'
 })
 function openRatioSheet() {
+	if (!modelConfigurationReady.value) return
 	uni.hideKeyboard()
 	// 互斥:打开比例时关掉张数
 	countSheetVisible.value = false
@@ -326,6 +348,7 @@ function openCountSheet() {
 	countSheetVisible.value = true
 }
 function openResolutionSheet() {
+	if (!modelConfigurationReady.value || !resolutionOptions.value.length) return
 	uni.hideKeyboard()
 	ratioSheetVisible.value = false
 	countSheetVisible.value = false
@@ -346,56 +369,106 @@ function selectCount(c) {
 	countSheetVisible.value = false
 }
 function selectResolution(value) {
+	if (!modelConfigurationReady.value || !resolutionOptions.value.includes(value)) return
 	generationStore.setParams({ resolution: value })
 	resolutionSheetVisible.value = false
 }
 
+function modelConfigurationOwner() {
+	return `${userStore.token || ''}:${userStore.userInfo?.id || userStore.userInfo?.userId || ''}`
+}
+
+function clearModelOptions() {
+	optionsRequestVersion += 1
+	optionsLoading.value = false
+	optionsError.value = ''
+	optionsModelId.value = null
+	resolutionOptions.value = []
+	resolutionBeanCosts.value = {}
+	ratioOptions.value = []
+	ratioSheetVisible.value = false
+	resolutionSheetVisible.value = false
+}
+
 async function fetchGenerationOptions() {
-	if (!userStore.isLoggedIn) return
+	clearModelOptions()
+	if (createPageDisposed || !userStore.isLoggedIn || !modelsReady.value || modelsLoading.value || !selectedImageModel.value) return false
 	const selectedId = generationStore.modelId
+	const requestVersion = optionsRequestVersion
+	const owner = modelConfigurationOwner()
+	const isCurrent = () => !createPageDisposed && userStore.isLoggedIn && owner === modelConfigurationOwner()
+		&& requestVersion === optionsRequestVersion && String(selectedId) === String(generationStore.modelId)
+	optionsLoading.value = true
 	try {
 		const data = await getGenerationOptions(selectedId)
-		if (String(selectedId) !== String(generationStore.modelId)) return
+		if (!isCurrent()) return false
+		if (!data || (data.modelId != null && String(data.modelId) !== String(selectedId))) throw new Error('出图配置与所选档位不一致')
 		if (Array.isArray(data?.aspectRatios) && data.aspectRatios.length) {
 			ratioOptions.value = data.aspectRatios
 			if (!ratioOptions.value.includes(generationStore.params.aspectRatio)) generationStore.setParams({ aspectRatio: ratioOptions.value[0] })
 		}
-		const supported = Array.isArray(data && data.supportedResolutions)
-			? data.supportedResolutions
-				.map((item) => String(item || '').toUpperCase())
-				.filter((item) => ['1K', '2K', '4K'].includes(item))
-			: []
-		resolutionOptions.value = [...new Set(supported)]
-		const rawCosts = data && data.beanCosts && typeof data.beanCosts === 'object' ? data.beanCosts : {}
-		resolutionBeanCosts.value = resolutionOptions.value.reduce((result, item) => {
-			const value = Number(rawCosts[item])
-			if (Number.isFinite(value)) result[item] = value
+		const configuration = {
+			resolutions: Array.isArray(data?.supportedResolutions) ? data.supportedResolutions : [],
+			beanCosts: data?.beanCosts,
+			defaultResolution: data?.defaultResolution,
+		}
+		const supported = imageResolutionOptions(configuration)
+		resolutionOptions.value = supported.map((item) => item.value)
+		resolutionBeanCosts.value = supported.reduce((result, item) => {
+			if (item.beans != null) result[item.value] = item.beans
 			return result
 		}, {})
-		if (!resolutionOptions.value.length) return
-		const defaultResolution = String((data && data.defaultResolution) || '').toUpperCase()
-		const current = String(generationStore.params.resolution || '').toUpperCase()
-		const selected = resolutionOptions.value.includes(current)
-			? current
-			: (resolutionOptions.value.includes(defaultResolution) ? defaultResolution : resolutionOptions.value[0])
-		generationStore.setParams({ resolution: selected })
+		// 读取响应到达时的模板参数；同模型新带入的合法清晰度也必须保留。
+		generationStore.setParams({ resolution: chooseImageResolution(configuration, generationStore.params.resolution) })
+		optionsModelId.value = selectedId
+		return true
 	} catch (e) {
-		// 选项拉取失败时不展示分辨率选择，提交继续使用后端默认值
-		resolutionOptions.value = []
-		resolutionBeanCosts.value = {}
+		if (isCurrent()) optionsError.value = '出图配置加载失败'
+		return false
+	} finally {
+		if (isCurrent()) optionsLoading.value = false
 	}
 }
 
 async function fetchModels() {
-	if (!userStore.isLoggedIn) return
+	const requestVersion = ++modelRequestVersion
+	const owner = modelConfigurationOwner()
+	const isCurrent = () => !createPageDisposed && userStore.isLoggedIn && owner === modelConfigurationOwner()
+		&& requestVersion === modelRequestVersion
+	clearModelOptions()
+	modelsReady.value = false
+	modelsError.value = ''
+	imageModels.value = []
+	if (createPageDisposed || !userStore.isLoggedIn) { modelsLoading.value = false; return false }
 	modelsLoading.value = true
 	try {
 		const data = await getAvailableModels()
-		imageModels.value = data?.imageModels || []
-		if (!selectedImageModel.value) generationStore.setModelId((imageModels.value.find((m) => m.isDefault === 1 || m.isDefault === true) || imageModels.value[0])?.modelId || null)
-	} catch { /* The server still validates any submitted model. */ }
-	finally { modelsLoading.value = false }
+		if (!isCurrent()) return false
+		imageModels.value = Array.isArray(data?.imageModels) ? data.imageModels : []
+		modelsReady.value = true
+		// 只有从未选择过档位时使用默认值；失效的模板选择必须由用户重新选择。
+		if (generationStore.modelId == null || generationStore.modelId === '') {
+			generationStore.setModelId((imageModels.value.find((m) => m.isDefault === 1 || m.isDefault === true) || imageModels.value[0])?.modelId ?? null)
+		}
+	} catch {
+		if (isCurrent()) modelsError.value = '出图档位加载失败'
+		return false
+	} finally {
+		if (isCurrent()) modelsLoading.value = false
+	}
+	if (!isCurrent()) return false
+	return fetchGenerationOptions()
 }
+
+function retryModelOptions() {
+	if (modelsLoading.value || optionsLoading.value || modelOptionsReady.value) return
+	if (!modelsReady.value) void fetchModels()
+	else void fetchGenerationOptions()
+}
+
+// 模板带入同样触发选项刷新；同步失效旧配置，阻止切换后的瞬间按旧价格提交。
+watch(() => generationStore.modelId, () => { void fetchGenerationOptions() }, { flush: 'sync' })
+watch(modelConfigurationOwner, () => { void fetchModels() }, { flush: 'sync' })
 async function fetchGenerationFeatureConfig() {
 	try {
 		const data = await getGenerationConfig()
@@ -426,7 +499,7 @@ function onRefReorder(order) {
 }
 
 // ====== 发送态:空 prompt 不可发 ======
-const canSend = computed(() => promptText.value.trim().length > 0 && !submitting.value && !referenceUploading.value)
+const canSend = computed(() => promptText.value.trim().length > 0 && !submitting.value && !referenceUploading.value && modelOptionsReady.value)
 
 // ====== 结果区 ======
 const results = computed(() => generationStore.results)
@@ -483,8 +556,15 @@ async function handleGenerate() {
 		uni.showToast({ title: '参考图上传中，请稍候', icon: 'none' })
 		return
 	}
-	if (!canSend.value) return
+	if (!promptText.value.trim() || submitting.value) return
 	if (!requireLogin()) return
+	if (!modelOptionsReady.value) {
+		const message = modelsLoading.value || optionsLoading.value ? '出图配置加载中，请稍候'
+			: modelsError.value || optionsError.value || modelConfigurationIssue.value || '请重新选择可用的出图档位'
+		uni.showToast({ title: message, icon: 'none' })
+		return
+	}
+	if (!canSend.value) return
 	uni.hideKeyboard()
 
 	const m = generationStore.mode
@@ -731,7 +811,6 @@ async function reloadCreatePage() {
 	if (!enabled) return
 	fetchRecentWorks()
 	await fetchModels()
-	fetchGenerationOptions()
 }
 
 onMounted(() => {
@@ -740,6 +819,9 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+	createPageDisposed = true
+	modelRequestVersion += 1
+	clearModelOptions()
 	clearPoll()
 })
 

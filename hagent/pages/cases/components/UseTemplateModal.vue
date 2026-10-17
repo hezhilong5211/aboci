@@ -30,6 +30,17 @@
 						</view>
 					</view>
 
+					<view class="ut-model-controls">
+						<ModelSelector label="出图模型" compact :models="imageModels" :model-value="selectedModelId"
+							:loading="modelsLoading" :disabled="confirming" @update:model-value="selectImageModel" />
+						<ImageResolutionSelector :options="resolutionOptions" v-model="resolution"
+							:loading="modelsLoading" :disabled="confirming || !selectedModel" />
+					</view>
+					<view v-if="modelError" class="ut-options-note">
+						<text>{{ modelError }}</text>
+						<text class="ut-options-retry" @tap="retryModels">{{ userStore.isLoggedIn ? '重新加载' : '去登录' }}</text>
+					</view>
+
 					<!-- 画幅 -->
 					<view class="ut-block">
 						<text class="ut-label">画幅</text>
@@ -48,8 +59,8 @@
 
 					<!-- 张数 -->
 					<view class="ut-block">
-						<text class="ut-label">张数</text>
-						<view class="ut-chips">
+						<text class="ut-label">生成张数（最多9张）</text>
+						<view class="ut-chips ut-chips--counts">
 							<view
 								class="ut-chip ut-chip--count"
 								v-for="c in countOptions"
@@ -77,8 +88,9 @@
 
 			<!-- 底部:确认使用 -->
 			<view class="ut-cta">
-				<view class="ut-cta-btn" @tap="onConfirm">
-					<text class="ut-cta-text">确认使用</text>
+				<text class="ut-cost">{{ consumeTip }}</text>
+				<view class="ut-cta-btn" :class="{ 'ut-cta-btn--disabled': confirming || modelsLoading || !selectedModel }" @tap="onConfirm">
+					<text class="ut-cta-text">{{ confirming ? '正在带入…' : '确认使用' }}</text>
 				</view>
 			</view>
 		</view>
@@ -86,11 +98,17 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, onUnmounted } from 'vue'
 import RefImageUploader from '@/pages/create/components/RefImageUploader.vue'
+import ModelSelector from '@/components/common/ModelSelector.vue'
+import ImageResolutionSelector from '@/components/common/ImageResolutionSelector.vue'
 import { useTemplate } from '@/api/template.js'
+import { getAvailableModels } from '@/api/agent.js'
 import { useGenerationStore } from '@/store/generation.js'
 import { useTabbarStore } from '@/store/tabbar.js'
+import { useUserStore } from '@/store/user.js'
+import { useLoginGuard } from '@/composables/useLoginGuard.js'
+import { imageResolutionOptions, chooseImageResolution } from '@/utils/image-resolution.js'
 
 const props = defineProps({
 	// 弹窗可见
@@ -103,10 +121,23 @@ const emit = defineEmits(['update:visible', 'confirm'])
 
 const generationStore = useGenerationStore()
 const tabbarStore = useTabbarStore()
+const userStore = useUserStore()
+const { requireLogin } = useLoginGuard()
 
-// 画幅 5 选项;张数 1~9
-const ratioOptions = ['1:1', '3:4', '4:3', '16:9', '9:16']
+// 画幅与价格使用后台能力，张数1~9。
+const fallbackRatios = ['1:1', '3:4', '4:3', '16:9', '9:16']
 const countOptions = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+const imageModels = ref([])
+const selectedModelId = ref(null)
+const selectedModel = computed(() => imageModels.value.find((model) => String(model.modelId) === String(selectedModelId.value)))
+const resolution = ref('')
+const resolutionOptions = computed(() => imageResolutionOptions(selectedModel.value))
+const ratioOptions = computed(() => selectedModel.value?.aspectRatios?.length ? selectedModel.value.aspectRatios : fallbackRatios)
+const modelsLoading = ref(false)
+const modelError = ref('')
+const confirming = ref(false)
+let modalVersion = 0
+let catalogVersion = 0
 
 // ====== 本地编辑态:弹窗打开时按 template 初始化 ======
 const promptText = ref('')
@@ -119,6 +150,57 @@ const isImg2Img = computed(() => mode.value === 'img2img')
 const refImages = ref([])
 // 上传中标记(防重复点)
 const uploading = ref(false)
+const consumeTip = computed(() => {
+	if (modelsLoading.value) return '正在加载档位与价格…'
+	const option = resolutionOptions.value.find((item) => item.value === resolution.value)
+	return option?.beans != null
+		? `本次生成 ${count.value} 张 · 预计消耗 ${option.beans * count.value} 豆`
+		: '请选择可用的档位与清晰度'
+})
+
+function normalizeCount(value) {
+	const n = Number(value)
+	return Number.isInteger(n) ? Math.min(9, Math.max(1, n)) : 1
+}
+
+function selectImageModel(id) {
+	if (confirming.value || modelsLoading.value) return
+	const model = imageModels.value.find((item) => String(item.modelId) === String(id))
+	if (!model) return
+	selectedModelId.value = model.modelId
+	resolution.value = chooseImageResolution(model, resolution.value)
+	if (!ratioOptions.value.includes(aspectRatio.value)) aspectRatio.value = ratioOptions.value[0]
+}
+
+async function loadModels() {
+	const version = ++catalogVersion
+	const opening = modalVersion
+	imageModels.value = []
+	modelsLoading.value = false
+	modelError.value = ''
+	if (!userStore.isLoggedIn) { modelError.value = '登录后可选择出图模型和清晰度'; return }
+	modelsLoading.value = true
+	try {
+		const data = await getAvailableModels()
+		if (!props.visible || opening !== modalVersion || version !== catalogVersion) return
+		imageModels.value = Array.isArray(data?.imageModels) ? data.imageModels : []
+		const chosen = imageModels.value.find((item) => String(item.modelId) === String(selectedModelId.value))
+			|| imageModels.value.find((item) => item.isDefault === true || item.isDefault === 1) || imageModels.value[0]
+		selectedModelId.value = chosen?.modelId ?? null
+		resolution.value = chooseImageResolution(chosen, resolution.value)
+		if (!ratioOptions.value.includes(aspectRatio.value)) aspectRatio.value = ratioOptions.value[0]
+		if (!chosen) modelError.value = '暂无可用出图档位，请稍后重试'
+	} catch {
+		if (opening === modalVersion && version === catalogVersion) modelError.value = '档位加载失败，请重新加载'
+	} finally {
+		if (opening === modalVersion && version === catalogVersion) modelsLoading.value = false
+	}
+}
+
+function retryModels() {
+	if (!requireLogin() || confirming.value || modelsLoading.value) return
+	void loadModels()
+}
 
 // 安全解析 params(JSON 串),失败返回空对象
 function parseParams(raw) {
@@ -144,20 +226,29 @@ function parseRefImages(raw) {
 
 // 弹窗打开时(visible 转 true)按当前 template 重置本地编辑态
 watch(
-	() => props.visible,
-	(v) => {
+	() => [props.visible, props.template],
+	([v]) => {
+		modalVersion++
+		catalogVersion++
+		confirming.value = false
 		if (!v) return
 		const t = props.template || {}
 		const params = parseParams(t.params)
 		promptText.value = t.prompt || ''
 		aspectRatio.value = params.aspectRatio || '3:4'
-		count.value = params.count || 1
+		count.value = normalizeCount(params.count ?? params.n ?? 1)
+		selectedModelId.value = params.modelId ?? generationStore.modelId ?? null
+		resolution.value = String(params.resolution || generationStore.params.resolution || '').toUpperCase()
 		mode.value = params.mode === 'img2img' ? 'img2img' : 'text2img'
 		// 图生图预置参考图带入,文生图清空
 		refImages.value = mode.value === 'img2img' ? parseRefImages(t.referenceImages) : []
+		void loadModels()
 	},
 	{ immediate: true }
 )
+
+watch(() => userStore.isLoggedIn, () => { if (props.visible) void loadModels() })
+onUnmounted(() => { modalVersion++; catalogVersion++ })
 
 function removeRef(index) {
 	refImages.value.splice(index, 1)
@@ -172,6 +263,8 @@ function reorderRefs(order) {
 
 // 关闭弹窗(点遮罩 / 关闭按钮)
 function onClose() {
+	modalVersion++
+	catalogVersion++
 	emit('update:visible', false)
 }
 
@@ -184,30 +277,47 @@ async function onConfirm() {
 		uni.showToast({ title: '参考图上传中，请稍候', icon: 'none' })
 		return
 	}
+	if (confirming.value || !props.visible || !requireLogin()) return
+	if (modelsLoading.value || !selectedModel.value) {
+		uni.showToast({ title: modelsLoading.value ? '档位加载中，请稍候' : '请先加载可用出图档位', icon: 'none' })
+		return
+	}
+	const model = selectedModel.value
+	const option = resolutionOptions.value.find((item) => item.value === resolution.value)
+	if (!option || option.beans == null) { uni.showToast({ title: '该清晰度暂不可用，请重新选择', icon: 'none' }); return }
+	if (!promptText.value.trim()) { uni.showToast({ title: '请填写提示词', icon: 'none' }); return }
+	if (isImg2Img.value && !model.supportsReferenceImages) { uni.showToast({ title: '该档位不支持参考图，请切换档位', icon: 'none' }); return }
+	if (isImg2Img.value && refImages.value.length > (model.maxReferenceImages || 9)) {
+		uni.showToast({ title: `该档位最多支持 ${model.maxReferenceImages || 9} 张参考图`, icon: 'none' }); return
+	}
 	const t = props.template || {}
 	// 图生图必须有参考图
 	if (isImg2Img.value && refImages.value.length === 0) {
 		uni.showToast({ title: '请先上传参考图', icon: 'none' })
 		return
 	}
-	// 计数 +1,失败静默(不阻断带入流程)
-	if (t.templateId != null) {
-		try {
-			await useTemplate(t.templateId)
-		} catch (e) {
-			// 计数失败不影响带入
-		}
-	}
-	generationStore.applyTemplate({
+	const payload = {
 		prompt: promptText.value,
 		mode: mode.value,
-		n: count.value,
+		modelId: model.modelId,
+		resolution: resolution.value,
+		n: normalizeCount(count.value),
 		aspectRatio: aspectRatio.value,
 		refImages: isImg2Img.value ? refImages.value.slice() : [],
-	})
-	emit('confirm')
-	emit('update:visible', false)
-	tabbarStore.switchTo('create')
+	}
+	const opening = modalVersion
+	confirming.value = true
+	try {
+		// 使用次数统计失败不影响参数带入，不在此处提交出图或扣费。
+		if (t.templateId != null) { try { await useTemplate(t.templateId) } catch {} }
+		if (!props.visible || opening !== modalVersion || !userStore.isLoggedIn) return
+		generationStore.applyTemplate(payload)
+		emit('confirm')
+		emit('update:visible', false)
+		tabbarStore.switchTo('create')
+	} finally {
+		if (opening === modalVersion) confirming.value = false
+	}
 }
 </script>
 
@@ -339,6 +449,13 @@ async function onConfirm() {
 	flex-wrap: wrap;
 	gap: 16rpx;
 }
+
+.ut-chips--counts { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14rpx; }
+.ut-model-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16rpx; margin-top: 28rpx; }
+.ut-options-note { display: flex; justify-content: space-between; gap: 16rpx; margin-top: 12rpx; color: #64748b; font-size: 24rpx; }
+.ut-options-retry { color: #4f76ad; flex-shrink: 0; }
+.ut-cost { display: block; text-align: center; font-size: 24rpx; color: #64748b; margin-bottom: 16rpx; }
+.ut-cta-btn--disabled { opacity: 0.55; }
 
 .ut-chip {
 	min-width: 96rpx;

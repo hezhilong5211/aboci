@@ -268,7 +268,7 @@ for (const kind of ['chat', 'create']) {
 // 模板入口复用同一上传组件，上传未完成时不能把缺少参考图的输入带入生成页。
 {
 	assert.match(template, /<RefImageUploader[\s\S]*?:max="4"[\s\S]*?@uploading-change="uploading = \$event"/)
-	assert.doesNotMatch(template, /sizeType|chooseImage/)
+	assert.doesNotMatch(template, /sizeType|\bchooseImage\s*\(/)
 	const toasts = []
 	const c = install(template, ['onConfirm', 'reorderRefs'], {
 		uploading: ref(true), uni: { showToast: ({ title }) => toasts.push(title) },
