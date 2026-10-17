@@ -4,12 +4,14 @@ import com.aurora.ai.agent.billing.BillingCalculator;
 import com.aurora.ai.agent.billing.IBeanDeductPort;
 import com.aurora.ai.agent.domain.GenerationTask;
 import com.aurora.ai.agent.dto.GenerationTaskVO;
+import com.aurora.ai.agent.dto.GenerateImageItem;
 import com.aurora.ai.agent.mapper.GenerationTaskMapper;
 import com.aurora.ai.agent.service.impl.GenerationTaskServiceImpl;
 import com.aurora.ai.domain.SysAiModel;
 import com.aurora.ai.mapper.SysAiModelMapper;
 import com.aurora.common.core.exception.ServiceException;
 import com.aurora.framework.mq.TaskProducer;
+import com.aurora.framework.storage.ProfileStorage;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
@@ -34,13 +36,15 @@ class GenerationTaskBillingSnapshotTest {
     private final IBeanDeductPort beans = mock(IBeanDeductPort.class);
     private final TaskProducer queue = mock(TaskProducer.class);
     private SysAiModel model;
+    private final ProfileStorage storage = mock(ProfileStorage.class);
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws Exception {
         TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""), GenerationTask.class);
-        service = spy(new GenerationTaskServiceImpl(new ObjectMapper(), queue, models, new BillingCalculator()));
+        service = spy(new GenerationTaskServiceImpl(new ObjectMapper(), queue, models, new BillingCalculator(), storage));
         ReflectionTestUtils.setField(service, "baseMapper", taskMapper);
         ReflectionTestUtils.setField(service, "beanDeductPort", beans);
+        when(storage.size(anyString())).thenReturn(1024L);
         model = new SysAiModel();
         model.setId(14L);
         model.setModelType("image");
@@ -136,6 +140,133 @@ class GenerationTaskBillingSnapshotTest {
         assertThat(service.submitImageGeneration(7L, null, "draw", 2, "2K", "16:9", List.of(), 14L, "stable-1"))
                 .isEqualTo("existing-task");
         verifyNoInteractions(beans, queue, taskMapper);
+    }
+
+    @Test
+    void nineImageSubmissionUsesSelectedResolutionAndChargesExactlyOnceOnRetry() {
+        String taskId = service.submitImageGeneration(7L, null, "draw nine", 9, "2K", "16:9",
+                List.of(), 14L, "nine-images");
+        ArgumentCaptor<GenerationTask> captured = ArgumentCaptor.forClass(GenerationTask.class);
+        verify(taskMapper).insert(captured.capture());
+        GenerationTask saved = captured.getValue();
+        assertThat(saved.getN()).isEqualTo(9);
+        assertThat(saved.getResolution()).isEqualTo("2K");
+        assertThat(saved.getPrepaidBeans()).isEqualTo(135L);
+        doReturn(saved).when(service).getOne(any(LambdaQueryWrapper.class));
+
+        assertThat(service.submitImageGeneration(7L, null, "draw nine", 9, "2K", "16:9",
+                List.of(), 14L, "nine-images")).isEqualTo(taskId);
+        verify(beans, times(1)).deduct(7L, 135L, "img:" + taskId, "AI出图预扣");
+        verify(taskMapper, times(1)).insert(any(GenerationTask.class));
+        assertThatThrownBy(() -> service.submitImageGeneration(7L, null, "draw nine", 9, "1K", "16:9",
+                List.of(), 14L, "nine-images")).isInstanceOf(ServiceException.class);
+    }
+
+    @Test
+    void unavailableResolutionAndExcessCountDoNotChargeOrQueue() {
+        assertThatThrownBy(() -> service.submitImageGeneration(7L, null, "draw", 9, "4K", "16:9",
+                List.of(), 14L, "unsupported")).isInstanceOf(ServiceException.class);
+        assertThatThrownBy(() -> service.submitImageGeneration(7L, null, "draw", 10, "2K", "16:9",
+                List.of(), 14L, "too-many")).isInstanceOf(ServiceException.class);
+        verifyNoInteractions(beans, queue, taskMapper);
+    }
+
+    @Test
+    void rejectsCombinedReferencesOverFiftyMegabytesBeforeDebitingOrQueuing() throws Exception {
+        when(storage.size("/profile/a.png")).thenReturn(30L * 1024 * 1024);
+        when(storage.size("/profile/b.png")).thenReturn(20L * 1024 * 1024 + 1);
+        assertThatThrownBy(() -> service.submitImageGeneration(7L, null, "draw", 1, "2K", "16:9",
+                List.of("/profile/a.png", "/profile/b.png"), 14L, "too-large"))
+                .isInstanceOf(ServiceException.class).hasMessageContaining("50MB");
+        verifyNoInteractions(beans, queue, taskMapper);
+    }
+
+    @Test
+    void acceptsExactlyFiftyMegabytesAndCountsEveryActualReference() throws Exception {
+        when(storage.size("/profile/a.png")).thenReturn(25L * 1024 * 1024);
+        String taskId = service.submitImageGeneration(7L, null, "draw", 1, "2K", "16:9",
+                List.of("/profile/a.png", "/profile/a.png"), 14L, "at-limit");
+        verify(beans).deduct(7L, 15L, "img:" + taskId, "AI出图预扣");
+        verify(storage, times(1)).size("/profile/a.png");
+    }
+
+    @Test
+    void batchChecksEachActualSubsetNotUnionOfAllInputs() throws Exception {
+        when(storage.size("/profile/a.png")).thenReturn(30L * 1024 * 1024);
+        when(storage.size("/profile/b.png")).thenReturn(30L * 1024 * 1024);
+        when(storage.size("/profile/c.png")).thenReturn(20L * 1024 * 1024);
+        List<GenerateImageItem> items = List.of(imageItem(1, List.of(1, 3)), imageItem(2, List.of(2, 3)));
+        String taskId = service.submitImageBatch(7L, 11L, 21L, items, "2K", "16:9",
+                List.of("/profile/a.png", "/profile/b.png", "/profile/c.png"), 14L, "valid-subsets");
+        verify(beans).deduct(7L, 30L, "img:" + taskId, "AI出图预扣");
+        verify(storage, times(1)).size("/profile/c.png");
+    }
+
+    @Test
+    void oneOversizedBatchItemRejectsWholeNewBatchBeforeAnyDebit() throws Exception {
+        when(storage.size("/profile/a.png")).thenReturn(30L * 1024 * 1024);
+        when(storage.size("/profile/b.png")).thenReturn(21L * 1024 * 1024);
+        List<GenerateImageItem> items = List.of(imageItem(1, List.of(1)), imageItem(2, List.of(1, 2)));
+        assertThatThrownBy(() -> service.submitImageBatch(7L, 11L, 21L, items, "2K", "16:9",
+                List.of("/profile/a.png", "/profile/b.png"), 14L, "invalid-subset"))
+                .hasMessageContaining("50MB");
+        verifyNoInteractions(beans, queue, taskMapper);
+    }
+
+    @Test
+    void existingStandaloneRequestReplaysWithoutReadingDeletedReferences() throws Exception {
+        GenerationTask existing = new GenerationTask();
+        existing.setTaskId("old-task"); existing.setModelId(14L); existing.setPrompt("draw");
+        existing.setN(1); existing.setResolution("2K"); existing.setAspectRatio("16:9");
+        existing.setRefImages("[\"/profile/removed.png\"]");
+        doReturn(existing).when(service).getOne(any(LambdaQueryWrapper.class));
+        when(storage.size(anyString())).thenThrow(new ServiceException("deleted"));
+        assertThat(service.submitImageGeneration(7L, null, "draw", 1, "2K", "16:9",
+                List.of("/profile/removed.png"), 14L, "old-request")).isEqualTo("old-task");
+        verifyNoInteractions(storage, beans, queue, taskMapper);
+    }
+
+    @Test
+    void existingBatchRequestReplaysWithoutReadingDeletedReferencesOrChargingAgain() throws Exception {
+        List<GenerateImageItem> items = List.of(imageItem(1, List.of(1)));
+        List<String> refs = List.of("/profile/removed.png");
+        String taskId = service.submitImageBatch(7L, 11L, 21L, items, "2K", "16:9", refs, 14L, "batch-replay");
+        ArgumentCaptor<GenerationTask> captured = ArgumentCaptor.forClass(GenerationTask.class);
+        verify(taskMapper).insert(captured.capture());
+        doReturn(captured.getValue()).when(service).getOne(any(LambdaQueryWrapper.class));
+        when(storage.size(anyString())).thenThrow(new ServiceException("deleted"));
+        clearInvocations(storage, beans, queue, taskMapper);
+        assertThat(service.submitImageBatch(7L, 11L, 21L, items, "2K", "16:9", refs, 14L, "batch-replay"))
+                .isEqualTo(taskId);
+        verifyNoInteractions(storage, beans, queue, taskMapper);
+    }
+
+    @Test
+    void otherProvidersKeepTheirExistingReferenceBehavior() {
+        model.setProvider("yunwu");
+        service.submitImageGeneration(7L, null, "draw", 1, "2K", "16:9",
+                List.of("https://example.invalid/external.png"), 14L, "other-provider");
+        verifyNoInteractions(storage);
+        verify(beans).deduct(eq(7L), eq(15L), anyString(), eq("AI出图预扣"));
+    }
+
+    @Test
+    void externalNonProfileReferencesAndMissingFilesAreRejectedWithoutFetchingOrCharging() throws Exception {
+        assertThatThrownBy(() -> service.submitImageGeneration(7L, null, "draw", 1, "2K", "16:9",
+                List.of("https://example.invalid/external.png"), 14L, "external"))
+                .hasMessageContaining("参考图地址无效");
+        verifyNoInteractions(storage);
+        when(storage.size("/profile/missing.png")).thenThrow(new java.io.IOException("missing"));
+        assertThatThrownBy(() -> service.submitImageGeneration(7L, null, "draw", 1, "2K", "16:9",
+                List.of("/profile/missing.png"), 14L, "missing"))
+                .hasMessageContaining("重新上传");
+        verifyNoInteractions(beans, queue, taskMapper);
+    }
+
+    private GenerateImageItem imageItem(int seq, List<Integer> references) {
+        GenerateImageItem item = new GenerateImageItem();
+        item.setSeq(seq); item.setPrompt("draw " + seq); item.setReferenceImageIndexes(references);
+        return item;
     }
 
     @Test

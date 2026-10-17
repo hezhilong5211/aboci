@@ -58,11 +58,20 @@ public class ProfileStorage {
      * 读取 profile 文件：先查当前配置目录，再查历史目录。
      */
     public byte[] read(String profileUrl) throws IOException {
+        return Files.readAllBytes(resolveExisting(profileUrl));
+    }
+
+    /** Read only file metadata; never load the image or fetch an external URL. */
+    public long size(String profileUrl) throws IOException {
+        return Files.size(resolveExisting(profileUrl));
+    }
+
+    private Path resolveExisting(String profileUrl) {
         String relativePath = requireRelativePath(profileUrl);
         for (Path root : roots()) {
             Path candidate = resolveUnder(root, relativePath);
             if (Files.isRegularFile(candidate)) {
-                return Files.readAllBytes(candidate);
+                return candidate;
             }
         }
         throw new ServiceException("图片文件不存在: " + profileUrl);

@@ -14,6 +14,7 @@ import com.aurora.ai.agent.dto.AgentChatRequest;
 import com.aurora.ai.agent.dto.AgentResumeRequest;
 import com.aurora.ai.agent.dto.AgentImageInput;
 import com.aurora.ai.agent.dto.GenerateImageItem;
+import com.aurora.ai.agent.dto.GenerationOptionsVO;
 import com.aurora.ai.agent.dto.ImageReferenceBinding;
 import com.aurora.ai.agent.dto.MessageAttachmentDraft;
 import com.aurora.ai.agent.security.ContentCheckResult;
@@ -234,17 +235,19 @@ public class AgentService {
                         : aiModelMapper.selectById(resumed.getModelId());
                 if (model == null) throw new ServiceException("原任务对话模型已不可用");
                 Long imageModelId = resumed == null ? req.getImageModelId() : resumed.getImageModelId();
-                if (imageModelId == null) {
-                    try { imageModelId = generationTaskService.getGenerationOptions().getModelId(); }
-                    catch (ServiceException ignored) { /* Text-only conversations can work without an image channel. */ }
-                }
+                String requestedResolution = resumed == null ? req.getImageResolution()
+                        : chatRunService.imageResolution(resumed);
+                GenerationOptionsVO imageOptions = resolveChatImageOptions(imageModelId, requestedResolution);
+                String imageResolution = resolveChatImageResolution(imageOptions, requestedResolution);
+                if (imageOptions != null) imageModelId = imageOptions.getModelId();
                 ChatRunService.Reservation reservation = chatRunService.reserve(userId, conversation.getId(), requestId,
-                        fingerprint, model, imageModelId, resumed);
+                        fingerprint, model, imageModelId, imageResolution, resumed);
                 if (!reservation.created()) return replayRun(reservation.run());
                 activeRun.persisted = reservation.run();
                 activeRun.chatModel = chatRunService.applyBillingSnapshot(activeRun.persisted, model);
                 req.setModelId(activeRun.persisted.getModelId());
                 req.setImageModelId(activeRun.persisted.getImageModelId());
+                req.setImageResolution(chatRunService.imageResolution(activeRun.persisted));
             } catch (ConversationLimitException e) {
                 return Flux.just(AgentSseEvent.error(e.getMessage(), ConversationLimitException.CODE,
                         ConversationLimitException.ACTION).toJsonLine());
@@ -302,11 +305,34 @@ public class AgentService {
         try {
             ObjectNode value = objectMapper.valueToTree(req);
             value.remove(List.of("requestId", "conversationId"));
+            // Keep pre-resolution client fingerprints replayable across this release.
+            if (req.getImageResolution() == null) value.remove("imageResolution");
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(value.toString().getBytes(StandardCharsets.UTF_8));
             return java.util.HexFormat.of().formatHex(digest);
         } catch (Exception e) {
             throw new ServiceException("对话请求无法保存");
         }
+    }
+
+    private GenerationOptionsVO resolveChatImageOptions(Long imageModelId, String requestedResolution) {
+        try {
+            return imageModelId == null ? generationTaskService.getGenerationOptions()
+                    : generationTaskService.getGenerationOptions(imageModelId);
+        } catch (ServiceException error) {
+            // A text-only request with no explicit image settings may work without an image channel.
+            if (imageModelId != null || StringUtils.hasText(requestedResolution)) throw error;
+            return null;
+        }
+    }
+
+    private String resolveChatImageResolution(GenerationOptionsVO options, String requested) {
+        if (!StringUtils.hasText(requested)) return options == null ? null : options.getDefaultResolution();
+        if (options == null || options.getSupportedResolutions() == null) {
+            throw new ServiceException("后台未配置可用分辨率");
+        }
+        return options.getSupportedResolutions().stream()
+                .filter(value -> value.equalsIgnoreCase(requested.trim())).findFirst()
+                .orElseThrow(() -> new ServiceException("所选分辨率未在后台启用"));
     }
 
     /** 恢复已通过安全审核并落库、但因豆子不足尚未产生助手回复的最后一条用户消息。 */
@@ -453,6 +479,7 @@ public class AgentService {
         List<AgentResult.ImageRef> collectedImages = new ArrayList<>();
         ToolExecutionState toolState = new ToolExecutionState();
         toolState.imageModelId = req.getImageModelId();
+        toolState.imageResolution = req.getImageResolution();
         toolState.requestId = req.getRequestId();
         try {
             ensureActive(activeRun.cancelled);
@@ -1693,9 +1720,9 @@ public class AgentService {
                     if (!node.isTextual()) throw new ServiceException("画面文字必须是字符串");
                     visibleTexts.add(node.asText());
                 }
-                item.setPrompt(ImagePromptCompiler.compileV5(prompt, bindings, attachmentIds,
+                item.setPrompt(ImagePromptCompiler.compileV6(prompt, bindings, attachmentIds,
                         referenceIndexes, visibleTexts));
-                item.setContractVersion(5);
+                item.setContractVersion(6);
                 item.setPlannedPrompt(prompt);
                 item.setVisibleTexts(List.copyOf(visibleTexts));
                 item.setReferenceBindings(bindings);
@@ -1717,7 +1744,7 @@ public class AgentService {
 
         String aspectRatio = args.path("aspect_ratio").asText(null);
         try {
-            // 对话内清晰度固定走后台默认,因此 resolution 传 null。
+            // 清晰度由用户设置及运行快照确定，不允许规划模型覆盖。
             String taskId = submitSelectedImageBatch(userId, conversationId, sourceMessageId, items,
                     emptyToNull(aspectRatio), normalizedImages, toolState);
             toolState.submitted = true;
@@ -1802,6 +1829,15 @@ public class AgentService {
             throw new ServiceException("原任务中的参考图已失效，请重新上传后继续");
         }
         String aspectRatio = emptyToNull(plan.path("aspectRatio").asText(null));
+        // Confirmation continues the quoted plan even if the user has since changed the picker.
+        if (plan.has("imageModelId")) {
+            state.imageModelId = plan.path("imageModelId").isNull() ? null : plan.path("imageModelId").longValue();
+        }
+        if (plan.has("imageResolution")) state.imageResolution = plan.path("imageResolution").asText(null);
+        ActiveRun activeRun = sinkRuns.get(sink);
+        if (activeRun != null && activeRun.persisted != null && chatRunService != null) {
+            chatRunService.updateImageSelection(activeRun.persisted, state.imageModelId, state.imageResolution);
+        }
 
         emit(sink, AgentSseEvent.tool("generate_images", "running", "正在提交出图"));
         try {
@@ -1881,6 +1917,8 @@ public class AgentService {
         plan.put("balance", balance);
         plan.put("needed", needed);
         plan.put("beanPerImage", beanPerImage);
+        plan.put("imageModelId", state.imageModelId);
+        plan.put("imageResolution", state.imageResolution);
         if (StringUtils.hasText(aspectRatio)) {
             plan.put("aspectRatio", aspectRatio);
         }
@@ -2234,11 +2272,11 @@ public class AgentService {
                 .append("6. effective_request写出当前全部有效要求；request_update区分REPLACE完整新要求、AMEND局部修改、CONFIRM确认执行，依据语义而非字数判断。新要求覆盖旧要求，最新数值和角色不可沿用历史值。用户原文与回答另存审计；job.prompt必须包含所有本张适用的目标、属性、数值、镜头和差异，不包含其他输出的命令。区分全局、分组、单张要求及例外，完整展开本张适用条件；effective_request只留存审计，不会自动传给图片模型，不能用它代替job.prompt。\n")
                 .append("7. 每个job只引用本次提交前已确定的素材，使用reference_attachment_ids。各张独立生成，不存在首图锚点、前序成品引用或分阶段执行；禁止通过其他工具或新任务绕过这一限制。\n")
                 .append("7.0. job.prompt中所有图片引用必须使用[[ref:附件ID]]，例如[[ref:abc]]提供材质，附件ID原样取自可用素材。不得写原图号、图片序号、输入图号或猜测附图位置；后端依据reference_attachment_ids实际顺序统一替换标记并生成职责表。各张请求互不共享上下文，禁止用“与成品1一致”“同上一张”代替完整要求。\n")
-                .append("7.01. 对用户要求保持的关键属性，从指定参考图提取简短、可见的具体特征，在适用任务中复用同一描述；不得从其他图片补入该属性，不编造不可见细节，不改变用户指定职责。提交前对照原始要求核对每个job的遗漏、冲突和例外；重要冲突先按用户明确优先级处理，仍无法消解再澄清。\n")
+                .append("7.01. 先从用户指定参考图提取需要保持的关键可见特征，形成共同描述，例如服装颜色、版型、领口与发型长度、轮廓；在所有适用job中原样完整复用，不得只写同一服装或同一发型。不得从其他图片补入该属性，不编造不可见细节，不改变用户指定职责。只供局部属性的图片不能带入其他外观，例如参考发色不等于继承其发型或服装。前后对比或左右区域必须分别展开共同特征、人物服装来源与各区域例外，不能把改造前属性扩散到改造后。提交前对照原始要求核对每个job的遗漏、冲突和例外；重要冲突先按用户明确优先级处理，仍无法消解再澄清。\n")
                 .append("7.1. 用户主动添加的历史作品是本次素材；未选择的历史图片和本任务尚未生成的结果不得作为输入。多角度系列直接复用相同的原始人物、发型、服装和环境依据。\n")
                 .append("7.11. 用户本轮明确引用之前的图片时，可用select_history_images按历史索引中的task_id/seq或attachment_id精确加载；仅加载语义明确的目标。多个候选无法唯一确定时先澄清，不能默认全部加载。工具加载后必须下一轮查看实际图片和新附件ID再规划生成。历史用途描述是生成请求摘要，不证明图片实际内容。\n")
-                .append("7.2. 用户明确要求精确引用本任务首张时，说明当前不支持，需用户将已有成品主动添加为新任务素材；没有人物素材时仅能统一文字描述，不承诺严格同脸。\n")
-                .append("7.3. 每个job必须提供reference_bindings覆盖每张实际引用图。source_type固定original，source_id为附件ID；attributes为通用属性数组，同一对象的同一属性只有一个primary，其余为detail。多主体使用subject_a.identity等对象作用域。用户明确职责优先于图片内容和Skill，不得擅自混用；未指定时才根据画面识别用途。\n")
+                .append("7.2. 用户明确要求精确引用本任务首张、先生成改造前单图再拼接成品等依赖流程时，必须如实说明当前不支持自动接续；可请用户将已有成品主动添加为新任务素材。直接独立生成不能视为同等流程，不得默默省略中间产物或承诺相同效果；仅在用户明确同意直接生成替代方案后执行。没有人物素材时仅能统一文字描述，不承诺严格同脸。\n")
+                .append("7.3. 每个job必须提供reference_bindings覆盖每张实际引用图。source_type固定original，source_id为附件ID；attributes为通用属性数组，同一对象的同一属性只有一个primary，其余为detail。多主体使用subject_a.identity等对象作用域，前后对比使用before.clothing与after.clothing等区域作用域。bindings必须覆盖prompt声明从图片提取的每个属性及适用区域，不得只声明改造前属性却在文字中也用于改造后。用户明确职责优先于图片内容和Skill，不得擅自混用；未指定时才根据画面识别用途。\n")
                 .append("7.5. 有新完整要求和完整新图组时使用REPLACE并按本条新上传编号绑定；AMEND只覆盖明确修改的内容，CONFIRM不重写已确认要求。删除或增加输出时，effective_request必须完整表达保留、删除和新增后的产出清单与总数，不要求用户使用固定措辞。无关历史对话不能覆盖当前契约。每项执行条件必须完整，禁止引用其他输出。\n")
                 .append("7.6. 合照、多个商品或多个对象用属性作用域区分：subject_a.identity与subject_b.identity、product_a.shape与product_b.shape可各有一个primary；job.prompt用相同对象名说明位置与关系，不把不同对象误判为同一属性冲突。\n")
                 .append("7.7. 海报、商品标签等需要逐字出现在画面中的文案放入visible_text数组，job.prompt只描述排版位置，不混入文案里的‘图1’‘Image 2’等字样；这些字样是画面文字，不是参考图坐标。\n")
@@ -2865,7 +2903,7 @@ public class AgentService {
         binding.putArray("required").add("source_type").add("source_id").add("attributes").add("usage");
         jobSchema.putArray("required").add("prompt")
                 .add("reference_attachment_ids").add("reference_bindings");
-        // 不暴露分辨率参数:对话内出图走后台模型列表配置的「默认清晰度」(default_resolution),不让模型选清晰度
+        // 分辨率来自用户选择或后台默认值，不向规划模型暴露可覆盖的参数。
         generateProps.putObject("aspect_ratio")
                 .put("type", "string")
                 .put("description", "画幅比例,可空(如 1:1 / 16:9 / 9:16 / 3:4)");
@@ -3091,7 +3129,7 @@ public class AgentService {
                                             List<String> images, ToolExecutionState state) {
         if (state.imageModelId == null && !StringUtils.hasText(state.requestId)) {
             return generationTaskService.submitImageBatch(userId, conversationId, sourceMessageId,
-                    items, null, aspectRatio, images);
+                    items, state.imageResolution, aspectRatio, images);
         }
         String requestId = null;
         if (StringUtils.hasText(state.requestId)) {
@@ -3099,7 +3137,7 @@ public class AgentService {
                     .getBytes(StandardCharsets.UTF_8)).toString();
         }
         return generationTaskService.submitImageBatch(userId, conversationId, sourceMessageId,
-                items, null, aspectRatio, images, state.imageModelId, requestId);
+                items, state.imageResolution, aspectRatio, images, state.imageModelId, requestId);
     }
 
     // ===== 内部累积结构 =====
@@ -3202,6 +3240,7 @@ public class AgentService {
         ReferenceContext selectedHistory;
         boolean historyPending;
         Long imageModelId;
+        String imageResolution;
         String requestId;
         String toolCallId;
         private int planCorrections;

@@ -11,6 +11,7 @@ import com.aurora.ai.domain.SysAiModel;
 import com.aurora.ai.mapper.SysAiModelMapper;
 import com.aurora.common.core.exception.ServiceException;
 import com.aurora.framework.mq.TaskProducer;
+import com.aurora.framework.storage.ProfileStorage;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
@@ -69,7 +70,7 @@ class GenerationTaskContractTest {
     void setUp() {
         TableInfoHelper.initTableInfo(
                 new MapperBuilderAssistant(new MybatisConfiguration(), ""), GenerationTask.class);
-        service = new GenerationTaskServiceImpl(objectMapper, taskProducer, modelMapper, new BillingCalculator());
+        service = new GenerationTaskServiceImpl(objectMapper, taskProducer, modelMapper, new BillingCalculator(), mock(ProfileStorage.class));
         ReflectionTestUtils.setField(service, "baseMapper", taskMapper);
         ReflectionTestUtils.setField(service, "beanDeductPort", beanDeductPort);
 

@@ -33,6 +33,19 @@ public final class ImagePromptCompiler {
     public static String compileV5(String jobPrompt, List<ImageReferenceBinding> bindings,
                                    List<String> attachmentIds, List<Integer> referenceIndexes,
                                    List<String> visibleTexts) {
+        return compileAttachmentReferences(jobPrompt, bindings, attachmentIds, referenceIndexes, visibleTexts, false);
+    }
+
+    /** V6 将主要属性的归属及局部素材的使用边界逐图展开；旧 V5 快照保持原文。 */
+    public static String compileV6(String jobPrompt, List<ImageReferenceBinding> bindings,
+                                   List<String> attachmentIds, List<Integer> referenceIndexes,
+                                   List<String> visibleTexts) {
+        return compileAttachmentReferences(jobPrompt, bindings, attachmentIds, referenceIndexes, visibleTexts, true);
+    }
+
+    private static String compileAttachmentReferences(String jobPrompt, List<ImageReferenceBinding> bindings,
+                                                      List<String> attachmentIds, List<Integer> referenceIndexes,
+                                                      List<String> visibleTexts, boolean isolateAttributes) {
         if (jobPrompt == null || jobPrompt.isBlank()) {
             throw new ServiceException("单张图片执行目标不能为空");
         }
@@ -59,7 +72,8 @@ public final class ImagePromptCompiler {
             throw new ServiceException("单张提示词不可使用原图号、输入位置或前序成品指代；"
                     + "图片引用改为[[ref:附件ID]]，展开本张全部适用要求；逐字画面文案放visible_text");
         }
-        return compile(expanded.toString(), bindings, attachmentIds, referenceIndexes, visibleTexts, true);
+        return compile(expanded.toString(), bindings, attachmentIds, referenceIndexes, visibleTexts, true,
+                isolateAttributes);
     }
 
     /**
@@ -75,12 +89,12 @@ public final class ImagePromptCompiler {
     public static String compile(String jobPrompt, List<ImageReferenceBinding> bindings,
                                  List<String> originalAttachmentIds, List<Integer> referenceIndexes,
                                  List<String> visibleTexts) {
-        return compile(jobPrompt, bindings, originalAttachmentIds, referenceIndexes, visibleTexts, false);
+        return compile(jobPrompt, bindings, originalAttachmentIds, referenceIndexes, visibleTexts, false, false);
     }
 
     private static String compile(String jobPrompt, List<ImageReferenceBinding> bindings,
                                   List<String> originalAttachmentIds, List<Integer> referenceIndexes,
-                                  List<String> visibleTexts, boolean resolvedReferences) {
+                                  List<String> visibleTexts, boolean resolvedReferences, boolean isolateAttributes) {
         if (jobPrompt == null || jobPrompt.isBlank()) {
             throw new ServiceException("单张图片执行目标不能为空");
         }
@@ -159,9 +173,39 @@ public final class ImagePromptCompiler {
                     .append("同一属性的主要依据是唯一图片标准；细节补充只能补充该属性，不能覆盖主要依据。\n")
                     .append("没有图片主要依据的属性按本张明确文字要求处理；细节补充不能覆盖该文字要求。\n")
                     .append("每张独立生成，仅使用本次输入素材，不引用其他生成结果。\n");
+            if (isolateAttributes) appendAttributeIsolation(prompt, inputs);
         }
         appendVisibleTexts(prompt, visibleTexts);
         return prompt.append("\n【执行边界】只生成本张目标对应的一张图片。").toString();
+    }
+
+    private static void appendAttributeIsolation(StringBuilder prompt, Map<Source, Input> inputs) {
+        prompt.append("\n【逐图属性隔离】\n")
+                .append("以下约束按本张实际输入位置执行，不能将一张参考图的整体外观复制到成品。\n");
+        for (Input input : inputs.values()) {
+            if (!input.primaryAttributes.isEmpty()) {
+                prompt.append("本任务输入图").append(input.index)
+                        .append("是以下属性的唯一主要来源：")
+                        .append(String.join("、", input.primaryAttributes))
+                        .append("。");
+                List<String> otherInputs = inputs.values().stream()
+                        .filter(other -> other.index != input.index)
+                        .map(other -> "本任务输入图" + other.index).toList();
+                if (!otherInputs.isEmpty()) {
+                    prompt.append("禁止从").append(String.join("、", otherInputs))
+                            .append("复制这些属性来替换该来源；");
+                }
+                prompt.append("只有职责表明确列出的同属性细节补充可以补充，仍不得改变主要依据。\n");
+            }
+            if (!input.detailAttributes.isEmpty()) {
+                prompt.append("从本任务输入图").append(input.index)
+                        .append("提取的细节仅限：")
+                        .append(String.join("、", input.detailAttributes))
+                        .append("。不能连带复制其未被分配的外观属性，也不能覆盖其他输入图的主要属性。\n");
+            }
+        }
+        prompt.append("前后状态、左右区域或多个对象的属性分别执行各自作用域；")
+                .append("不得把一个状态、区域或对象的差异带入另一个。\n");
     }
 
     /** 历史数据只读兼容；所有执行入口拒绝非空旧依赖，不静默删图后重放。 */

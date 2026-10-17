@@ -62,32 +62,16 @@
 						</view>
 					</view>
 
-					<!-- 参考图:仅图生图显示 -->
-					<view class="ut-block" v-if="isImg2Img">
-						<view class="ut-ref-head">
-							<text class="ut-label">参考图</text>
-							<text class="ut-ref-hint">（1-4 张）</text>
-						</view>
-						<view class="ut-ref-list">
-							<!-- 已选缩略图 -->
-							<view class="ut-ref-item" v-for="(url, index) in refImages" :key="url + index">
-								<image class="ut-ref-img" :src="resolveUrl(url)" mode="aspectFill" @tap="previewRef(index)" />
-								<view class="ut-ref-remove" @tap.stop="removeRef(index)">
-									<text class="ut-ref-remove-text">×</text>
-								</view>
-							</view>
-							<!-- 虚线 + 号添加位:未满 4 张展示 -->
-							<view
-								class="ut-ref-add"
-								v-if="refImages.length < 4"
-								:class="{ 'ut-ref-add--loading': uploading }"
-								@tap="chooseRef"
-							>
-								<text v-if="!uploading" class="ut-ref-add-plus">+</text>
-								<text v-else class="ut-ref-add-loading-text">上传中</text>
-							</view>
-						</view>
-					</view>
+					<!-- 模板与生成页共用原图上传和顺序保护，模板保留最多4张参考图。 -->
+					<RefImageUploader
+						v-if="isImg2Img"
+						:images="refImages"
+						:max="4"
+						@add="refImages.push($event)"
+						@remove="removeRef"
+						@reorder="reorderRefs"
+						@uploading-change="uploading = $event"
+					/>
 				</view>
 			</scroll-view>
 
@@ -103,8 +87,7 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
-import config from '@/utils/config.js'
-import { uploadFile } from '@/api/common.js'
+import RefImageUploader from '@/pages/create/components/RefImageUploader.vue'
 import { useTemplate } from '@/api/template.js'
 import { useGenerationStore } from '@/store/generation.js'
 import { useTabbarStore } from '@/store/tabbar.js'
@@ -121,9 +104,9 @@ const emit = defineEmits(['update:visible', 'confirm'])
 const generationStore = useGenerationStore()
 const tabbarStore = useTabbarStore()
 
-// 画幅 5 选项;张数 1~4
+// 画幅 5 选项;张数 1~9
 const ratioOptions = ['1:1', '3:4', '4:3', '16:9', '9:16']
-const countOptions = [1, 2, 3, 4]
+const countOptions = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
 // ====== 本地编辑态:弹窗打开时按 template 初始化 ======
 const promptText = ref('')
@@ -176,51 +159,15 @@ watch(
 	{ immediate: true }
 )
 
-// 相对路径拼 baseUrl 供展示
-function resolveUrl(url) {
-	if (!url) return ''
-	if (/^https?:\/\//.test(url)) return url
-	return config.baseUrl + url
-}
-
-// 选图 → 逐张上传 → 收集 /profile url
-function chooseRef() {
-	if (uploading.value) return
-	const remain = 4 - refImages.value.length
-	if (remain <= 0) return
-	uni.chooseImage({
-		count: remain,
-		sizeType: ['compressed'],
-		sourceType: ['album', 'camera'],
-		success: async (res) => {
-			const paths = res.tempFilePaths || []
-			if (!paths.length) return
-			uploading.value = true
-			try {
-				for (const p of paths) {
-					const data = await uploadFile(p, 'agent')
-					if (data && data.url) {
-						refImages.value.push(data.url)
-					}
-				}
-			} finally {
-				uploading.value = false
-			}
-		},
-	})
-}
-
-// 删除指定索引参考图
 function removeRef(index) {
 	refImages.value.splice(index, 1)
 }
 
-// 预览已选参考图
-function previewRef(index) {
-	uni.previewImage({
-		current: index,
-		urls: refImages.value.map((u) => resolveUrl(u)),
-	})
+function reorderRefs(order) {
+	if (!Array.isArray(order) || order.length !== refImages.value.length || new Set(order).size !== order.length) return
+	if (order.some((index) => !Number.isInteger(index) || index < 0 || index >= refImages.value.length)) return
+	const current = refImages.value
+	refImages.value = order.map((index) => current[index])
 }
 
 // 关闭弹窗(点遮罩 / 关闭按钮)
@@ -233,6 +180,10 @@ function onClose() {
  * 图生图把参考图 url 数组一并带入,文生图不带参考图
  */
 async function onConfirm() {
+	if (uploading.value) {
+		uni.showToast({ title: '参考图上传中，请稍候', icon: 'none' })
+		return
+	}
 	const t = props.template || {}
 	// 图生图必须有参考图
 	if (isImg2Img.value && refImages.value.length === 0) {
@@ -426,94 +377,6 @@ async function onConfirm() {
 
 .ut-chip--active .ut-chip-text {
 	color: #ffffff;
-}
-
-/* 参考图 */
-.ut-ref-head {
-	display: flex;
-	align-items: baseline;
-	margin-bottom: 16rpx;
-}
-
-.ut-ref-hint {
-	margin-left: 4rpx;
-	font-size: 26rpx;
-	color: #4f84ea;
-	line-height: 1;
-}
-
-.ut-ref-list {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 20rpx;
-}
-
-.ut-ref-item {
-	position: relative;
-	width: 168rpx;
-	height: 168rpx;
-	border-radius: 24rpx;
-	overflow: hidden;
-	border: 2rpx solid #dbe7f6;
-}
-
-.ut-ref-img {
-	width: 100%;
-	height: 100%;
-}
-
-.ut-ref-remove {
-	position: absolute;
-	top: 8rpx;
-	right: 8rpx;
-	width: 36rpx;
-	height: 36rpx;
-	border-radius: 50%;
-	background: rgba(15, 23, 42, 0.5);
-	display: flex;
-	align-items: center;
-	justify-content: center;
-}
-
-.ut-ref-remove-text {
-	font-size: 28rpx;
-	color: #ffffff;
-	line-height: 1;
-}
-
-.ut-ref-add {
-	width: 168rpx;
-	height: 168rpx;
-	box-sizing: border-box;
-	border-radius: 24rpx;
-	border: 2rpx dashed #c8c2ec;
-	background: #f8f8fc;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	transition: opacity 0.15s ease, transform 0.15s ease;
-}
-
-.ut-ref-add:active {
-	opacity: 0.9;
-	transform: scale(0.98);
-}
-
-.ut-ref-add--loading {
-	opacity: 0.7;
-}
-
-.ut-ref-add-plus {
-	font-size: 56rpx;
-	font-weight: 300;
-	color: #94a3b8;
-	line-height: 1;
-}
-
-.ut-ref-add-loading-text {
-	font-size: 24rpx;
-	color: #94a3b8;
-	line-height: 1;
 }
 
 /* 底部 CTA */

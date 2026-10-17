@@ -90,7 +90,7 @@ class AgentServiceTest {
         JsonNode event = new ObjectMapper().readTree(events.get(0));
         assertEquals("CONVERSATION_TOO_LONG", event.path("errorCode").asText());
         assertEquals("NEW_CONVERSATION", event.path("action").asText());
-        verify(runs, never()).reserve(anyLong(), anyLong(), anyString(), anyString(), any(), any(), any());
+        verify(runs, never()).reserve(anyLong(), anyLong(), anyString(), anyString(), any(), any(), any(), any());
         verifyNoInteractions(models, messages, images, responses, beans);
     }
 
@@ -161,7 +161,7 @@ class AgentServiceTest {
             run.setModelId(9L);
             run.setImageModelId(20L);
             run.setStatus("QUEUED");
-            when(runs.reserve(eq(7L), eq(11L), eq("never-started"), anyString(), eq(model), eq(20L), isNull()))
+            when(runs.reserve(eq(7L), eq(11L), eq("never-started"), anyString(), eq(model), eq(20L), isNull(), isNull()))
                     .thenReturn(new ChatRunService.Reservation(run, true));
             when(runs.applyBillingSnapshot(run, model)).thenReturn(model);
             AgentChatRequest request = new AgentChatRequest();
@@ -441,7 +441,7 @@ class AgentServiceTest {
         assertTrue(before.getPrompt().contains("本任务输入图1（上传素材）：主要依据：scene。"));
         assertFalse(before.getPrompt().contains("hair_structure"));
         assertTrue(itemsCaptor.getValue().stream().allMatch(item ->
-                item.getContractVersion() == 5
+                item.getContractVersion() == 6
                         && item.getSourcePrompt().contains(prompt)
                         && !item.getPrompt().contains(prompt)));
         assertTrue(events != null && events.stream().anyMatch(event ->
@@ -562,7 +562,7 @@ class AgentServiceTest {
         assertTrue(detail.getPrompt().contains("本任务输入图1（上传素材）：主要依据：product_label。"));
         assertTrue(detail.getPrompt().contains("本任务输入图2（上传素材）：主要依据：scene。"));
         assertTrue(itemsCaptor.getValue().stream().allMatch(item ->
-                item.getContractVersion() == 5
+                item.getContractVersion() == 6
                         && item.getReferenceAttachmentIds().equals(drafts.get().stream()
                                 .map(com.aurora.ai.agent.dto.MessageAttachmentDraft::attachmentId).toList())
                         && item.getSourcePrompt().contains(prompt)
@@ -708,7 +708,7 @@ class AgentServiceTest {
         assertEquals(1, context.path("affordablePlan").path("affordableCount").asInt());
         assertEquals(5, context.path("affordablePlan").path("items").size());
         JsonNode savedItem = context.path("affordablePlan").path("items").get(0);
-        assertEquals(5, savedItem.path("contractVersion").asInt());
+        assertEquals(6, savedItem.path("contractVersion").asInt());
         assertEquals("生成5张图", savedItem.path("sourcePrompt").asText());
         assertEquals("生成5张图", savedItem.path("effectiveRequest").asText());
         assertEquals("REPLACE", savedItem.path("requestUpdate").asText());
@@ -1297,7 +1297,7 @@ class AgentServiceTest {
         assertTrue(item.getSourcePrompt().contains("可以"));
         assertEquals(source.getContent(), item.getEffectiveRequest());
         assertEquals("CONFIRM", item.getRequestUpdate());
-        assertEquals(5, item.getContractVersion());
+        assertEquals(6, item.getContractVersion());
         assertTrue(item.getPrompt().contains("本任务输入图1（上传素材）：主要依据：identity。"));
         assertTrue(item.getPrompt().contains("本任务输入图2（上传素材）：主要依据：scene。"));
         assertFalse(item.getPrompt().contains("将图1和图2融合"));

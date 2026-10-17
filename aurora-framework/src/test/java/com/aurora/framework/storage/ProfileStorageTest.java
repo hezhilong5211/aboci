@@ -28,10 +28,27 @@ class ProfileStorageTest {
         ProfileStorage storage = new ProfileStorage(configured.toString(), home.toString());
 
         assertThat(new String(storage.read("/profile/mobile_avatar/old.png"))).isEqualTo("legacy");
+        assertThat(storage.size("/profile/mobile_avatar/old.png")).isEqualTo(6);
         assertThat(storage.write("mobile_avatar/new.png", "new".getBytes()))
                 .isEqualTo("/profile/mobile_avatar/new.png");
         assertThat(new String(storage.read("https://example.com/profile/mobile_avatar/new.png?x=1")))
                 .isEqualTo("new");
+        assertThat(storage.size("https://example.com/profile/mobile_avatar/new.png?x=1")).isEqualTo(3);
+    }
+
+    @Test
+    void sizeUsesConfiguredPrecedenceAndRejectsMissingOrNonProfilePaths() throws Exception {
+        Path configured = tempDir.resolve("configured");
+        Path home = tempDir.resolve("home");
+        Path legacy = home.resolve("aurora/uploadPath/same.png");
+        Files.createDirectories(legacy.getParent());
+        Files.writeString(legacy, "legacy");
+        ProfileStorage storage = new ProfileStorage(configured.toString(), home.toString());
+        storage.write("same.png", "current".getBytes());
+        assertThat(storage.size("/profile/same.png")).isEqualTo(7);
+        assertThatThrownBy(() -> storage.size("/profile/missing.png")).hasMessageContaining("图片文件不存在");
+        assertThatThrownBy(() -> storage.size("https://example.com/large.png")).hasMessageContaining("非法图片地址");
+        assertThatThrownBy(() -> storage.size("/profile/../escape.png")).hasMessageContaining("非法图片地址");
     }
 
     @Test

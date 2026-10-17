@@ -106,7 +106,7 @@
 			<view class="param-sheet" @tap.stop>
 				<view class="param-sheet-handle" />
 				<text class="param-sheet-title">{{ paramSheetTitle }}</text>
-				<view class="sheet-options">
+				<view class="sheet-options" :class="{ 'sheet-options--counts': countSheetVisible }">
 					<template v-if="ratioSheetVisible">
 						<view
 							class="sheet-option"
@@ -290,7 +290,7 @@ const imageModels = ref([]), modelsLoading = ref(false)
 const selectedImageModel = computed(() => imageModels.value.find((m) => String(m.modelId) === String(generationStore.modelId)))
 const maxReferenceImages = computed(() => selectedImageModel.value?.maxReferenceImages || 9)
 function selectImageModel(id) { generationStore.setModelId(id); fetchGenerationOptions() }
-const countOptions = [1, 2, 3, 4]
+const countOptions = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 const resolutionOptions = ref([])
 const resolutionBeanCosts = ref({})
 const aspectRatio = computed(() => generationStore.params.aspectRatio)
@@ -990,6 +990,23 @@ defineExpose({
 	padding: 8rpx 0 12rpx;
 }
 
+.sheet-options--counts {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 16rpx;
+	padding-top: 24rpx;
+}
+.sheet-options--counts .sheet-option {
+	justify-content: center;
+	gap: 12rpx;
+	border: 2rpx solid #edeef2;
+	border-radius: 18rpx;
+}
+.sheet-options--counts .sheet-option--active {
+	border-color: #8eb2f6;
+	background: #f1f6ff;
+}
+
 .sheet-option {
 	display: flex;
 	align-items: center;
@@ -999,7 +1016,7 @@ defineExpose({
 	border-bottom: 2rpx solid #edeef2;
 }
 
-.sheet-option:last-child {
+.sheet-options:not(.sheet-options--counts) .sheet-option:last-child {
 	border-bottom: none;
 }
 

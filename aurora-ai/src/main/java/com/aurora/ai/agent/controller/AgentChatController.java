@@ -157,8 +157,8 @@ public class AgentChatController {
             return Result.error("请输入出图提示词");
         }
         int n = (req.getN() == null) ? 1 : req.getN();
-        if (n < 1 || n > 4) {
-            return Result.error("张数需为 1~4 张");
+        if (n < 1 || n > 9) {
+            return Result.error("张数需为 1~9 张");
         }
         if (req.getRefImages() != null && req.getRefImages().size() > 9) {
             return Result.error("参考图最多9张");

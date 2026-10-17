@@ -22,6 +22,7 @@ import com.aurora.ai.provider.LuxaiImageClient;
 import com.aurora.ai.mapper.SysAiModelMapper;
 import com.aurora.common.core.exception.ServiceException;
 import com.aurora.framework.mq.TaskProducer;
+import com.aurora.framework.storage.ProfileStorage;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
@@ -40,6 +41,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.dao.DuplicateKeyException;
 
 import java.util.List;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -64,6 +66,7 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
     private final TaskProducer taskProducer;
     private final SysAiModelMapper sysAiModelMapper;
     private final BillingCalculator billingCalculator;
+    private final ProfileStorage profileStorage;
 
     /**
      * 豆子扣减端口(跨模块 SPI,admin 提供 BeanDeductAdapter)。
@@ -89,7 +92,7 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
     public String submitGenerationTask(Long userId, Long conversationId, String prompt, int n,
                                        String resolution, String aspectRatio, Long modelId, String refImages,
                                        String requestItems) {
-        // 底层任务上限 9 张；生成页控制器仍单独限制为 1~4 张。
+        // 生成页和对话共用任务上限 9 张。
         if (n < 1 || n > 9) {
             throw new ServiceException("单次最多9张");
         }
@@ -98,8 +101,15 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
         if (snapshots != null) for (JsonNode item : snapshots) ImagePromptCompiler.requireIndependent(item);
         // modelId 为空时取一个启用的 image 类出图模型(provider 限 yunwu/gptsapi)
         SysAiModel selectedModel = resolveImageModel(modelId, refImages != null && !refImages.isBlank());
+        List<List<String>> referencesByItem = new ArrayList<>();
+        if (snapshots != null && !snapshots.isEmpty()) {
+            for (JsonNode item : snapshots) referencesByItem.add(parseStringArray(item.path("refImages")));
+        } else {
+            referencesByItem.add(parseStringArray(refImages));
+        }
+        validateLuxaiReferenceSizes(selectedModel, referencesByItem);
         Long resolvedModelId = selectedModel.getId();
-        // 清晰度:调用方未指定则走模型默认清晰度(default_resolution)——对话内出图固定走默认,避免出 4K 大图
+        // 清晰度:调用方未指定则走模型默认清晰度(default_resolution)。
         String resolvedResolution = resolution;
         if (resolvedResolution == null || resolvedResolution.isBlank()) {
             SysAiModel rm = sysAiModelMapper.selectById(resolvedModelId);
@@ -144,6 +154,7 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
         if (model == null) {
             throw new ServiceException("无可用出图模型");
         }
+        validateLuxaiReferenceSizes(model, List.of(refImages == null ? List.of() : refImages));
         String resolvedResolution = resolveResolution(model, resolution);
         String resolvedAspectRatio = resolveAspectRatio(model, aspectRatio, resolvedResolution);
         // 预扣:按申请张数算应扣豆子;余额不足抛 InsufficientBeanException(携带余额/应扣/单价),不提交任务、不扣豆
@@ -185,6 +196,7 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
 
         boolean img2img = false;
         List<Map<String, Object>> resolvedItems = new ArrayList<>(items.size());
+        List<List<String>> referencesByItem = new ArrayList<>(items.size());
         for (int i = 0; i < items.size(); i++) {
             GenerateImageItem item = items.get(i);
             if (item == null || item.getPrompt() == null || item.getPrompt().isBlank()) {
@@ -210,6 +222,7 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
             }
             ImagePromptCompiler.requireIndependent(objectMapper.valueToTree(item));
             img2img |= !itemRefs.isEmpty();
+            referencesByItem.add(itemRefs);
             Map<String, Object> stored = new LinkedHashMap<>();
             stored.put("seq", i + 1);
             // 用户已给出的完整提示词保持原文，不在任务层修剪或改写。
@@ -218,11 +231,14 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
                     ? List.of() : List.copyOf(item.getReferenceImageIndexes()));
             stored.put("refImages", itemRefs);
             if (item.getContractVersion() != null) {
-                if ((item.getContractVersion() < 2 || item.getContractVersion() > 5) || item.getReferenceAttachmentIds() == null
+                if ((item.getContractVersion() < 2 || item.getContractVersion() > 6) || item.getReferenceAttachmentIds() == null
                         || item.getReferenceAttachmentIds().size() != refs.size()) {
                     throw new ServiceException("图片参考契约版本或附件快照无效");
                 }
                 String compiled = item.getContractVersion() <= 3 ? item.getPrompt()
+                        : item.getContractVersion() == 6 ? ImagePromptCompiler.compileV6(item.getPlannedPrompt(),
+                        item.getReferenceBindings(), item.getReferenceAttachmentIds(),
+                        item.getReferenceImageIndexes(), item.getVisibleTexts())
                         : item.getContractVersion() == 5 ? ImagePromptCompiler.compileV5(item.getPlannedPrompt(),
                         item.getReferenceBindings(), item.getReferenceAttachmentIds(),
                         item.getReferenceImageIndexes(), item.getVisibleTexts()) : ImagePromptCompiler.compile(item.getPlannedPrompt(),
@@ -252,6 +268,7 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
             return existing.getTaskId();
         }
         SysAiModel model = resolveImageModel(modelId, img2img);
+        validateLuxaiReferenceSizes(model, referencesByItem);
         String resolvedResolution = resolveResolution(model, resolution);
         String resolvedAspectRatio = resolveAspectRatio(model, aspectRatio, resolvedResolution);
         int n = items.size();
@@ -438,6 +455,7 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
         if (!item.referenceImages().isEmpty() && !MobileModelCatalogService.supportsReferences(model.getProvider())) {
             throw new ServiceException("原模型不支持图生图，无法精确重新生成");
         }
+        validateLuxaiReferenceSizes(model, List.of(item.referenceImages()));
         String resolution = source.getResolution();
         if (resolution == null || resolution.isBlank()) {
             resolution = resolveResolution(model, null);
@@ -793,6 +811,33 @@ public class GenerationTaskServiceImpl extends ServiceImpl<GenerationTaskMapper,
         }
         if (prompt.codePointCount(0, prompt.length()) > MAX_PROMPT_CODE_POINTS) {
             throw new ServiceException("提示词最多32000个字符");
+        }
+    }
+
+    /** Each upstream edit receives only its own references; check metadata before any debit or queue write. */
+    private void validateLuxaiReferenceSizes(SysAiModel model, List<List<String>> referencesByItem) {
+        if (!"luxai".equalsIgnoreCase(model.getProvider())) return;
+        Map<String, Long> knownSizes = new LinkedHashMap<>();
+        for (List<String> references : referencesByItem) {
+            long total = 0L;
+            for (String reference : references) {
+                String localUrl = ProfileStorage.normalizeProfileUrl(reference);
+                if (localUrl == null) throw new ServiceException("参考图地址无效，请先上传图片");
+                Long size = knownSizes.get(localUrl);
+                if (size == null) {
+                    try {
+                        size = profileStorage.size(localUrl);
+                    } catch (IOException | ServiceException error) {
+                        throw new ServiceException("参考图片无法读取，请重新上传后再试");
+                    }
+                    knownSizes.put(localUrl, size);
+                }
+                if (size < 4) throw new ServiceException("参考图为空或格式无效，请重新上传");
+                if (size > LuxaiImageClient.MAX_REFERENCE_BYTES - total) {
+                    throw new ServiceException("单张出图使用的参考图总大小不能超过50MB，请减少参考图或缩小图片后重试");
+                }
+                total += size;
+            }
         }
     }
 

@@ -25,6 +25,11 @@ export function uploadFile(filePath, category = 'common') {
 				'Authorization': token ? `Bearer ${token}` : ''
 			},
 			success: (res) => {
+				if (res.statusCode === 413) {
+					uni.showToast({ title: '原图每张不能超过10MB，请重新选择', icon: 'none' })
+					reject(new Error('图片大小不能超过10MB'))
+					return
+				}
 				try {
 					const data = JSON.parse(res.data)
 					if (data.code === 200) {

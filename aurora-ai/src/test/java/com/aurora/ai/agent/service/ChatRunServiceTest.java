@@ -109,6 +109,46 @@ class ChatRunServiceTest {
     }
 
     @Test
+    void selectedResolutionSurvivesDisconnectAndRechargeInsteadOfUsingNewSelection() {
+        when(mapper.selectOne(any())).thenReturn(null);
+        when(mapper.insert(any(ChatRun.class))).thenAnswer(invocation -> {
+            ((ChatRun) invocation.getArgument(0)).setId(1L);
+            return 1;
+        });
+        ChatRun original = service.reserve(7L, 11L, "resolution-original", "hash",
+                model(), 20L, "4K", null).run();
+        assertEquals("4K", service.toView(original).getImageResolution());
+
+        ChatRun resumed = service.reserve(7L, 11L, "resolution-resume", "resume-hash",
+                model(), 99L, "1K", original).run();
+        assertEquals(20L, resumed.getImageModelId());
+        assertEquals("4K", service.imageResolution(resumed));
+        assertEquals(original.getBillingSnapshot(), resumed.getBillingSnapshot());
+        verifyNoInteractions(generations);
+    }
+
+    @Test
+    void legacyRunWithoutResolutionStillLoads() {
+        ChatRun legacy = run("COMPLETED");
+        legacy.setBillingSnapshot("{\"input\":100,\"output\":500,\"cached\":null}");
+        assertNull(service.imageResolution(legacy));
+        assertNull(service.toView(legacy).getImageResolution());
+        assertEquals(100L, service.applyBillingSnapshot(legacy, model()).getBeanPerMtokenInput());
+    }
+
+    @Test
+    void affordablePlanRestoresOriginalImageSettingsWithoutChangingTextBilling() {
+        ChatRun current = run("RUNNING");
+        current.setImageModelId(99L);
+        current.setBillingSnapshot("{\"input\":100,\"output\":500,\"cached\":null,\"imageResolution\":\"1K\"}");
+        service.updateImageSelection(current, 20L, "4K");
+        assertEquals(20L, service.toView(current).getImageModelId());
+        assertEquals("4K", service.toView(current).getImageResolution());
+        assertEquals(100L, service.applyBillingSnapshot(current, model()).getBeanPerMtokenInput());
+        verify(mapper).updateById(current);
+    }
+
+    @Test
     void snapshotIncludesTextEvenWhenNoSubscriberIsPresentAndImagesRemainGenerating() {
         ChatRun run = run("RUNNING");
         service.observe(run, AgentSseEvent.text("第一段"));

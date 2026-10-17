@@ -180,11 +180,14 @@
 			</scroll-view>
 
 			<view class="chat-models" v-if="userStore.isLoggedIn">
-				<view class="chat-model-slot">
+				<view class="chat-model-slot" v-if="chatModels.length > 1">
 					<ModelSelector compact label="对话" :models="chatModels" :model-value="conversationStore.currentSession.modelId" :disabled="interactionLocked" :loading="modelsLoading" @update:model-value="selectChatModel" />
 				</view>
 				<view class="chat-model-slot">
 					<ModelSelector compact label="出图" :models="imageModels" :model-value="conversationStore.currentSession.imageModelId" :disabled="interactionLocked" :loading="modelsLoading" @update:model-value="selectImageModel" />
+				</view>
+				<view class="chat-model-slot">
+					<ImageResolutionSelector :options="chatImageResolutionOptions" :model-value="conversationStore.currentSession.imageResolution" :disabled="interactionLocked" :loading="modelsLoading" @update:model-value="selectImageResolution" />
 				</view>
 			</view>
 			<!-- 编辑器:上传/文字/发送三段固定分区,文字增高不改变按钮位置与可用宽度 -->
@@ -310,6 +313,8 @@ import ClarificationCard from './components/ClarificationCard.vue'
 import InputPlusPopup from './components/InputPlusPopup.vue'
 import HistoryOverlay from './components/HistoryOverlay.vue'
 import ModelSelector from '@/components/common/ModelSelector.vue'
+import ImageResolutionSelector from '@/components/common/ImageResolutionSelector.vue'
+import { imageResolutionOptions, chooseImageResolution } from '@/utils/image-resolution.js'
 import ImageOrderEditor from '@/components/common/ImageOrderEditor.vue'
 import { renderMarkdown } from '@/utils/markdown.js'
 
@@ -358,15 +363,29 @@ const showStopButton = computed(
 const hasMessages = computed(() => messages.value.length > 0)
 
 const chatModels = ref([]), imageModels = ref([]), modelsLoading = ref(false)
+const selectedChatImageModel = computed(() => imageModels.value.find((model) => sameId(model.modelId, conversationStore.currentSession.imageModelId)))
+const chatImageResolutionOptions = computed(() => imageResolutionOptions(selectedChatImageModel.value))
 let modelsLoadVersion = 0
 function ensureModelSelection() {
 	if (modelsLoading.value || (!chatModels.value.length && !imageModels.value.length)) return
 	const session = conversationStore.currentSession
 	const choose = (list, id) => list.find((m) => sameId(m.modelId, id))?.modelId || list.find((m) => m.isDefault === 1 || m.isDefault === true)?.modelId || list[0]?.modelId || null
 	conversationStore.setModels(choose(chatModels.value, session.modelId), choose(imageModels.value, session.imageModelId))
+	ensureImageResolution()
 }
 function selectChatModel(id) { conversationStore.setModels(id, conversationStore.currentSession.imageModelId) }
-function selectImageModel(id) { conversationStore.setModels(conversationStore.currentSession.modelId, id) }
+function selectImageModel(id) {
+	conversationStore.setModels(conversationStore.currentSession.modelId, id)
+	ensureImageResolution()
+}
+function ensureImageResolution() {
+	const model = selectedChatImageModel.value
+	if (model) conversationStore.setImageResolution(chooseImageResolution(model, conversationStore.currentSession.imageResolution))
+}
+function selectImageResolution(value) {
+	if (interactionLocked.value || modelsLoading.value) return
+	if (chatImageResolutionOptions.value.some((option) => option.value === value)) conversationStore.setImageResolution(value)
+}
 async function loadModels() {
 	if (!userStore.isLoggedIn) return
 	const epoch = sessionEpoch, version = ++modelsLoadVersion
@@ -925,6 +944,7 @@ watch(
 		() => imageModels.value.length,
 		() => conversationStore.currentSession.modelId,
 		() => conversationStore.currentSession.imageModelId,
+		() => conversationStore.currentSession.imageResolution,
 	],
 	scheduleDockMeasure,
 	{ immediate: true }
@@ -1216,14 +1236,15 @@ function applyRunSnapshot(session, run) {
 	session.recovering = running
 	session.streaming = false
 	if (run.modelId != null && session.modelId == null) session.modelId = run.modelId
-	if (run.imageModelId != null && session.imageModelId == null) session.imageModelId = run.imageModelId
+	if (run.imageModelId != null && (running || session.imageModelId == null)) session.imageModelId = run.imageModelId
+	if (run.imageResolution && (running || !session.imageResolution)) session.imageResolution = run.imageResolution
 	if (run.clarification) session.pendingClarification = run.clarification
 	if (rechargeRequired) {
 		if (run.messageId != null) {
 			const previous = sameId(session.pendingResumeTask?.sourceMessageId, run.messageId) ? session.pendingResumeTask : null
 			conversationStore.setPendingResumeTask({
 				...previous, conversationId: session.conversationId, sourceMessageId: run.messageId,
-				modelId: run.modelId, imageModelId: run.imageModelId,
+				modelId: run.modelId, imageModelId: run.imageModelId, imageResolution: run.imageResolution || previous?.imageResolution,
 				continuationMode: run.clarification?.scopeId || run.assistantMessageId != null ? 'confirmation' : 'resume',
 				clarificationScopeId: run.clarification?.scopeId || previous?.clarificationScopeId,
 				clarificationOptionId: run.clarification?.key === 'INSUFFICIENT_BALANCE' ? 'generate_requested' : previous?.clarificationOptionId,
@@ -1573,22 +1594,30 @@ function chooseAndUpload() {
 	referenceUploading.value = true
 	uni.chooseImage({
 		count: remaining,
-		sizeType: ['compressed'],
+		sizeType: ['original'],
 		success: async (res) => {
 			const paths = res.tempFilePaths || []
 			const uploaded = []
 			try {
-				for (const p of paths) {
+				if ((res.tempFiles || []).some((file) => Number(file.size) > 10 * 1024 * 1024)) {
+					uni.showToast({ title: '原图每张不能超过10MB，请重新选择', icon: 'none' })
+					return
+				}
+				if ((res.tempFiles || []).reduce((total, file) => total + (Number(file.size) || 0), 0) > 50 * 1024 * 1024) {
+					uni.showToast({ title: '参考图合计不能超过50MB，请重新选择', icon: 'none' })
+					return
+				}
+				for (const [index, p] of paths.entries()) {
 					if (uploadVersion !== referenceUploadVersion) return
 					try {
 						const data = await uploadFile(p, 'agent')
 						if (uploadVersion !== referenceUploadVersion) return
-						if (data && data.url) {
-							// 按本次选图顺序收集，不让不同批次按上传完成时间交错。
-							uploaded.push({ type: 'upload', url: data.url })
-						}
+						if (!data?.url) throw new Error('上传未返回图片地址')
+						// 整批成功后才追加，不让失败图片导致后续参考图编号前移。
+						uploaded.push({ type: 'upload', url: data.url })
 					} catch (e) {
-						// 单张失败已由 uploadFile 内部 toast,继续下一张
+						if (uploadVersion === referenceUploadVersion) uni.showToast({ title: `第${index + 1}张上传失败，本批未添加，请重试`, icon: 'none' })
+						return
 					}
 				}
 				if (uploadVersion === referenceUploadVersion && uploaded.length) {
@@ -1684,9 +1713,15 @@ function selectClarificationOption(message, option) {
 	if (clarification.key === 'INSUFFICIENT_BALANCE' && option.id === 'recharge') {
 		const sourceMessageId = findClarificationSourceMessageId(message)
 		if (sourceMessageId != null) {
+			const saved = conversationStore.pendingResumeTask
+			const previous = sameId(saved?.sourceMessageId, sourceMessageId) ? saved : null
 			conversationStore.setPendingResumeTask({
+				...previous,
 				conversationId: conversationStore.conversationId,
 				sourceMessageId,
+				modelId: previous?.modelId || conversationStore.currentSession.modelId,
+				imageModelId: previous?.imageModelId || conversationStore.currentSession.imageModelId,
+				imageResolution: previous?.imageResolution || conversationStore.currentSession.imageResolution,
 				skill: activeSkill.value || undefined,
 				clarificationScopeId: clarification.scopeId,
 				clarificationOptionId: 'generate_requested',
@@ -1739,6 +1774,7 @@ async function handleSend() {
 				const createdSession = conversationStore.getSession(created.conversationId)
 				createdSession.modelId = draftSession.modelId
 				createdSession.imageModelId = draftSession.imageModelId
+				createdSession.imageResolution = draftSession.imageResolution
 				createdSession.draft = submittedDraft
 				conversationStore.persist()
 				return
@@ -1811,6 +1847,7 @@ async function handleSend() {
 			message: text,
 			modelId: conversationStore.currentSession.modelId || undefined,
 			imageModelId: conversationStore.currentSession.imageModelId || undefined,
+			imageResolution: conversationStore.currentSession.imageResolution || undefined,
 			imageInputs: imageInputs.length ? imageInputs : undefined,
 			skill,
 			clarificationScopeId: clarificationScopeId || undefined,
@@ -1878,7 +1915,7 @@ function createStreamHandlers(ai, streamPayload) {
 			const recharge = event?.errorCode === 'INSUFFICIENT_BEANS' && event.action === 'RECHARGE'
 			if (recharge && ai.sourceMessageId != null) conversationStore.setPendingResumeTask({
 				conversationId: id, sourceMessageId: ai.sourceMessageId, modelId: streamPayload.modelId,
-				imageModelId: streamPayload.imageModelId, skill: streamPayload.skill,
+				imageModelId: streamPayload.imageModelId, imageResolution: streamPayload.imageResolution, skill: streamPayload.skill,
 				clarificationScopeId: streamPayload.clarificationScopeId, clarificationOptionId: streamPayload.clarificationOptionId, ready: false,
 			}, id)
 			finishStream(id, streamPayload.requestId)
@@ -1936,6 +1973,7 @@ async function tryResumePendingTask() {
 		conversationId: pending.conversationId,
 		modelId: pending.modelId || conversationStore.currentSession.modelId || undefined,
 		imageModelId: pending.imageModelId || conversationStore.currentSession.imageModelId || undefined,
+		imageResolution: pending.imageResolution || conversationStore.currentSession.imageResolution || undefined,
 		skill: pending.skill,
 		clarificationScopeId: pending.clarificationScopeId,
 		clarificationOptionId: pending.clarificationOptionId,

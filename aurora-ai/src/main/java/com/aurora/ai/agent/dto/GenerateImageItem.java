@@ -20,7 +20,7 @@ public class GenerateImageItem implements Serializable {
     /** 按本张属性职责编译的执行提示词 */
     private String prompt;
 
-    /** null/2/3 为历史快照；4 为职责表；5 将正文附件标记统一编译为实际输入位置。 */
+    /** null/2/3 为历史快照；4 为职责表；5 编译附件标记；6 增加非职责属性隔离。 */
     private Integer contractVersion;
 
     /** 原始要求与历次澄清原文，仅供追溯，不混入其他输出的执行提示词。 */

@@ -20,6 +20,88 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ImagePromptCompilerTest {
 
     @Test
+    void shouldKeepFrozenV5PromptUnchanged() {
+        String prompt = ImagePromptCompiler.compileV5("[[ref:outfit]]提供服装。",
+                List.of(new ImageReferenceBinding("original", "outfit", List.of("服装"), "primary")),
+                List.of("outfit"), List.of(1), List.of());
+        assertEquals("""
+                【本张唯一执行目标】
+                本任务输入图1提供服装。
+
+                【本任务输入契约（唯一有效图片编号）】
+                本任务输入图1（上传素材）：主要依据：服装。
+
+                【参考职责边界】
+                以上编号严格对应本次实际输入顺序，参考职责以本表为准。
+                正文与本表的输入图编号完全一致，均指本次实际附图位置；不存在另一套原图编号。
+                每张图片只提供明确列出的属性，不得因为画面包含其他内容就扩大其参考职责。
+                同一属性的主要依据是唯一图片标准；细节补充只能补充该属性，不能覆盖主要依据。
+                没有图片主要依据的属性按本张明确文字要求处理；细节补充不能覆盖该文字要求。
+                每张独立生成，仅使用本次输入素材，不引用其他生成结果。
+
+                【执行边界】只生成本张目标对应的一张图片。""", prompt);
+    }
+
+    @Test
+    void shouldIsolateHairstyleClothingSceneAndColorInReorderedV6Inputs() {
+        String prompt = ImagePromptCompiler.compileV6(
+                "[[ref:hair]]提供圆润短发，[[ref:outfit]]提供面容和灰色针织服装，"
+                        + "[[ref:scene]]提供白墙环境，[[ref:before]]仅提供白发的分布与数量。",
+                List.of(new ImageReferenceBinding("original", "hair", List.of("发型长度", "发型轮廓"), "primary"),
+                        new ImageReferenceBinding("original", "outfit", List.of("人物身份", "服装颜色", "服装款式"), "primary"),
+                        new ImageReferenceBinding("original", "scene", List.of("环境", "光线"), "primary"),
+                        new ImageReferenceBinding("original", "before", List.of("白发分布", "白发数量"), "detail")),
+                List.of("hair", "scene", "outfit", "before-scene", "before"),
+                List.of(1, 2, 3, 5), List.of());
+
+        assertTrue(prompt.contains("本任务输入图1是以下属性的唯一主要来源：发型长度、发型轮廓。"
+                + "禁止从本任务输入图2、本任务输入图3、本任务输入图4复制这些属性来替换该来源"));
+        assertTrue(prompt.contains("本任务输入图3是以下属性的唯一主要来源：人物身份、服装颜色、服装款式。"
+                + "禁止从本任务输入图1、本任务输入图2、本任务输入图4复制这些属性来替换该来源"));
+        assertTrue(prompt.contains("本任务输入图2是以下属性的唯一主要来源：环境、光线。"
+                + "禁止从本任务输入图1、本任务输入图3、本任务输入图4复制这些属性来替换该来源"));
+        assertTrue(prompt.contains("从本任务输入图4提取的细节仅限：白发分布、白发数量。"
+                + "不能连带复制其未被分配的外观属性"));
+        assertFalse(prompt.contains("本任务输入图5"));
+        assertFalse(prompt.contains("before-scene"));
+    }
+
+    @Test
+    void shouldAllowBeforeAfterScopesAndSharedClothingWithoutBlendingThem() {
+        String prompt = ImagePromptCompiler.compileV6(
+                "左侧改造前长发来自[[ref:before]]，右侧改造后短发来自[[ref:after]]，"
+                        + "两侧服装均来自[[ref:outfit]]；[[ref:before]]仅为改造后提供白发细节。",
+                List.of(new ImageReferenceBinding("original", "before", List.of("before.hairstyle"), "primary"),
+                        new ImageReferenceBinding("original", "after", List.of("after.hairstyle"), "primary"),
+                        new ImageReferenceBinding("original", "outfit", List.of("shared.clothing"), "primary"),
+                        new ImageReferenceBinding("original", "before", List.of("after.white_hair"), "detail")),
+                List.of("before", "after", "outfit"), List.of(1, 2, 3), List.of("改造前", "改造后"));
+
+        assertTrue(prompt.contains("本任务输入图1是以下属性的唯一主要来源：before.hairstyle。"));
+        assertTrue(prompt.contains("本任务输入图2是以下属性的唯一主要来源：after.hairstyle。"));
+        assertTrue(prompt.contains("本任务输入图3是以下属性的唯一主要来源：shared.clothing。"));
+        assertTrue(prompt.contains("从本任务输入图1提取的细节仅限：after.white_hair。"));
+        assertTrue(prompt.contains("前后状态、左右区域或多个对象的属性分别执行各自作用域"));
+    }
+
+    @Test
+    void shouldAllowDetailSupplementsAndNewTextDefinedAttributes() {
+        String prompt = ImagePromptCompiler.compileV6(
+                "[[ref:face]]提供面容，[[ref:texture]]补充皮肤肌理；服装按文字设计全新蓝色衬衫。",
+                List.of(new ImageReferenceBinding("original", "face", List.of("identity", "skin.texture"), "primary"),
+                        new ImageReferenceBinding("original", "texture", List.of("skin.texture"), "detail")),
+                List.of("face", "texture"), List.of(1, 2), List.of());
+
+        assertTrue(prompt.contains("只有职责表明确列出的同属性细节补充可以补充"));
+        assertTrue(prompt.contains("从本任务输入图2提取的细节仅限：skin.texture。"));
+        assertTrue(prompt.contains("没有图片主要依据的属性按本张明确文字要求处理"));
+        assertFalse(prompt.contains("唯一主要来源：服装"));
+        String textOnly = "设计一件全新蓝色衬衫。";
+        assertEquals(ImagePromptCompiler.compileV5(textOnly, List.of(), List.of(), List.of(), List.of()),
+                ImagePromptCompiler.compileV6(textOnly, List.of(), List.of(), List.of(), List.of()));
+    }
+
+    @Test
     void shouldTranslateOriginalTwoAndThreeToActualInputsOneAndTwo() {
         String prompt = ImagePromptCompiler.compileV5("使用[[ref:second]]的环境和[[ref:third]]的服装。",
                 List.of(new ImageReferenceBinding("original", "second", List.of("环境"), "primary"),

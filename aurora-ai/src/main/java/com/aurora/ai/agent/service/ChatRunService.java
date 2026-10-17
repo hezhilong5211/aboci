@@ -62,6 +62,13 @@ public class ChatRunService {
     @Transactional(rollbackFor = Exception.class)
     public Reservation reserve(Long userId, Long conversationId, String requestId,
                            String fingerprint, SysAiModel model, Long imageModelId, ChatRun resumed) {
+        return reserve(userId, conversationId, requestId, fingerprint, model, imageModelId, null, resumed);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public Reservation reserve(Long userId, Long conversationId, String requestId,
+                               String fingerprint, SysAiModel model, Long imageModelId,
+                               String imageResolution, ChatRun resumed) {
         Conversation owned = conversationMapper.selectOwnedForUpdate(conversationId, userId);
         if (owned == null) throw new ServiceException("会话不存在或无权访问");
         ChatRun existing = findRequest(userId, requestId);
@@ -80,7 +87,7 @@ public class ChatRunService {
         run.setRequestFingerprint(fingerprint);
         run.setModelId(model.getId());
         run.setImageModelId(resumed == null ? imageModelId : resumed.getImageModelId());
-        run.setBillingSnapshot(resumed == null ? billingSnapshot(model) : resumed.getBillingSnapshot());
+        run.setBillingSnapshot(resumed == null ? billingSnapshot(model, imageResolution) : resumed.getBillingSnapshot());
         run.setStatus("QUEUED");
         run.setText("");
         run.setThinking("");
@@ -165,6 +172,7 @@ public class ChatRunService {
         vo.setAssistantMessageId(run.getAssistantMessageId());
         vo.setModelId(run.getModelId());
         vo.setImageModelId(run.getImageModelId());
+        vo.setImageResolution(imageResolution(run));
         vo.setStatus(run.getStatus());
         vo.setText(run.getText());
         vo.setThinking(run.getThinking());
@@ -313,7 +321,33 @@ public class ChatRunService {
         conversationMapper.update(null, update);
     }
 
-    private String billingSnapshot(SysAiModel model) {
+    /** Resolution travels with the durable run, including a recharge continuation. */
+    public String imageResolution(ChatRun run) {
+        if (run == null || run.getBillingSnapshot() == null) return null;
+        try {
+            return objectMapper.readTree(run.getBillingSnapshot()).path("imageResolution").asText(null);
+        } catch (Exception e) {
+            throw new ServiceException("原任务出图设置不可用，请联系管理员");
+        }
+    }
+
+    /** A balance confirmation continues its original image settings, even after a picker change. */
+    public void updateImageSelection(ChatRun run, Long imageModelId, String imageResolution) {
+        if (run == null) return;
+        synchronized (run) {
+            try {
+                ObjectNode snapshot = (ObjectNode) objectMapper.readTree(run.getBillingSnapshot());
+                snapshot.put("imageResolution", imageResolution);
+                run.setImageModelId(imageModelId);
+                run.setBillingSnapshot(snapshot.toString());
+                flush(run);
+            } catch (Exception e) {
+                throw new ServiceException("原任务出图设置不可用，请联系管理员");
+            }
+        }
+    }
+
+    private String billingSnapshot(SysAiModel model, String imageResolution) {
         ObjectNode rates = objectMapper.createObjectNode();
         rates.put("input", model.getBeanPerMtokenInput());
         rates.put("cached", model.getBeanPerMtokenInputCached());
@@ -323,6 +357,7 @@ public class ChatRunService {
         rates.put("baseUrl", model.getBaseUrl());
         rates.put("maxTokens", model.getMaxTokens());
         rates.put("temperature", model.getTemperature());
+        rates.put("imageResolution", imageResolution);
         return rates.toString();
     }
 

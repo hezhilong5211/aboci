@@ -16,6 +16,7 @@ public class ChatRunVO {
     private Long assistantMessageId;
     private Long modelId;
     private Long imageModelId;
+    private String imageResolution;
     private String status;
     private String text;
     private String thinking;

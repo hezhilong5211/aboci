@@ -30,6 +30,9 @@ public class AgentChatRequest {
     /** 图片工具使用的模型；为空时使用默认图像模型。 */
     private Long imageModelId;
 
+    /** 用户选择的出图清晰度；为空时使用所选图像模型默认值。 */
+    private String imageResolution;
+
     /**
      * 用户消息文本
      */

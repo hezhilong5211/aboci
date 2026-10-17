@@ -24,7 +24,7 @@ public class GenerateImageRequest implements Serializable {
     /** 分辨率档位，必须属于后台默认图像模型勾选项 */
     private String resolution;
 
-    /** 张数(1~4) */
+    /** 张数(1~9) */
     private Integer n;
 
     /** 图生图参考图 /profile URL 列表(可空,1~9 张;空=文生图) */

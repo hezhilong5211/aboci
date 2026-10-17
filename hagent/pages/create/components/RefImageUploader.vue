@@ -6,6 +6,7 @@
 			<text class="ref-title-hint">（1-{{ max }} 张）</text>
 			<text class="ref-order-hint" v-if="images.length > 1">长按排序</text>
 		</view>
+		<text class="ref-quality-hint">保留原图细节，每张不超过 10MB，合计不超过 50MB</text>
 		<view class="ref-list">
 			<!-- 已上传缩略图 -->
 			<view class="ref-item" v-for="(url, index) in images" :key="url + index">
@@ -95,21 +96,33 @@ function choose() {
 	setUploading(true)
 	uni.chooseImage({
 		count: remain,
-		sizeType: ['compressed'],
+		sizeType: ['original'],
 		sourceType: ['album', 'camera'],
 		success: async (res) => {
 			const paths = res.tempFilePaths || []
+			const uploaded = []
 			try {
-				for (const p of paths) {
+				if ((res.tempFiles || []).some((file) => Number(file.size) > 10 * 1024 * 1024)) {
+					uni.showToast({ title: '原图每张不能超过10MB，请重新选择', icon: 'none' })
+					return
+				}
+				if ((res.tempFiles || []).reduce((total, file) => total + (Number(file.size) || 0), 0) > 50 * 1024 * 1024) {
+					uni.showToast({ title: '参考图合计不能超过50MB，请重新选择', icon: 'none' })
+					return
+				}
+				for (const [index, p] of paths.entries()) {
 					if (version !== uploadVersion) return
 					try {
 						const data = await uploadFile(p, 'agent')
 						if (version !== uploadVersion) return
-						if (data && data.url) emit('add', data.url)
+						if (!data?.url) throw new Error('上传未返回图片地址')
+						uploaded.push(data.url)
 					} catch (e) {
-						// 单张失败已由上传接口提示，后续图片继续按选择顺序上传。
+						if (version === uploadVersion) uni.showToast({ title: `第${index + 1}张上传失败，本批未添加，请重试`, icon: 'none' })
+						return
 					}
 				}
+				if (version === uploadVersion) uploaded.forEach((url) => emit('add', url))
 			} finally {
 				if (version === uploadVersion) setUploading(false)
 			}
@@ -152,6 +165,7 @@ function preview(index) {
 .ref-uploader {
 	margin-top: 24rpx;
 }
+.ref-quality-hint { display: block; margin: 8rpx 0 16rpx; color: #8b97a7; font-size: 22rpx; }
 
 .ref-title {
 	display: flex;

@@ -9,7 +9,7 @@ import { agentChatStream } from './sse.js'
 
 /**
  * 流式对话
- * @param {Object} params - { requestId, conversationId?, modelId?, message, imageInputs?, skill?, clarificationScopeId?, clarificationOptionId? }
+ * @param {Object} params - { requestId, conversationId?, modelId?, imageModelId?, imageResolution?, message, imageInputs?, skill?, clarificationScopeId?, clarificationOptionId? }
  * @param {Object} handlers - { onMeta, onQueue, onThinking, onText, onTool, onClarification, onResult, onDone, onError }
  * @returns {Object} 含 abort() 的对象（供调用方中断）
  */
@@ -33,7 +33,7 @@ export function stopChat(runId) {
 
 /**
  * 独立出图（生成页 C 组）：文生图 / 图生图
- * @param {Object} body - { prompt, aspectRatio?, resolution?, n(1-4), refImages?(最多9张,图生图用) }
+ * @param {Object} body - { prompt, aspectRatio?, resolution?, n(1-9), refImages?(最多9张,图生图用) }
  * @returns {Promise<Object>} - { taskId }，前端用 getGeneration 轮询出图结果
  */
 export function generateImage(body) {

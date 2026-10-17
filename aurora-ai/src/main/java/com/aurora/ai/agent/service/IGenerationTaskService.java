@@ -30,7 +30,7 @@ public interface IGenerationTaskService extends IService<GenerationTask> {
      * @param messageId      触发任务的用户消息(可空；独立生成页为空)
      * @param modelId        出图模型 id
      * @param prompt         任务提示词
-     * @param n              张数(1~9；生成页入口另限 1~4)
+     * @param n              张数(1~9)
      * @param resolution     分辨率(可空,空走模型默认)
      * @param aspectRatio    画幅比例(可空)
      * @param refImages      图生图参考图 /profile URL JSON 数组串(可空,空=文生图)
@@ -50,7 +50,7 @@ public interface IGenerationTaskService extends IService<GenerationTask> {
      * @param userId         所属用户(取自登录态)
      * @param conversationId 来源会话(可空)
      * @param prompt         任务提示词
-     * @param n              张数(1~9；生成页入口另限 1~4)
+     * @param n              张数(1~9)
      * @param resolution     分辨率(可空,空走模型默认)
      * @param aspectRatio    画幅比例(可空)
      * @param modelId        出图模型 id(可空,空则取启用的 image 模型)
@@ -70,7 +70,7 @@ public interface IGenerationTaskService extends IService<GenerationTask> {
      * @param userId         所属用户(取自登录态)
      * @param conversationId 来源会话(可空)
      * @param prompt         任务提示词
-     * @param n              张数(1~9；生成页入口另限 1~4)
+     * @param n              张数(1~9)
      * @param aspectRatio    画幅比例(可空,空走默认)
      * @param resolution     分辨率档位(可空,空走后台默认)
      * @param refImages      图生图参考图 /profile URL 列表(1~9,空=文生图)

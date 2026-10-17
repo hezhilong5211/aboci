@@ -13,6 +13,7 @@ import com.aurora.ai.domain.SysAiModel;
 import com.aurora.ai.mapper.SysAiModelMapper;
 import com.aurora.common.core.exception.ServiceException;
 import com.aurora.framework.mq.TaskProducer;
+import com.aurora.framework.storage.ProfileStorage;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -23,6 +24,8 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -60,7 +63,7 @@ class GenerationTaskServiceImplTest {
         TableInfoHelper.initTableInfo(
                 new MapperBuilderAssistant(new MybatisConfiguration(), ""), GenerationTask.class);
         service = spy(new GenerationTaskServiceImpl(
-                objectMapper, taskProducer, modelMapper, new BillingCalculator()));
+                objectMapper, taskProducer, modelMapper, new BillingCalculator(), mock(ProfileStorage.class)));
         ReflectionTestUtils.setField(service, "beanDeductPort", beanDeductPort);
         doReturn(true).when(service).updateById(any(GenerationTask.class));
     }
@@ -75,8 +78,9 @@ class GenerationTaskServiceImplTest {
                 .hasMessage("提示词最多32000个字符");
     }
 
-    @Test
-    void shouldFreezeV5ReferencesAndRejectChangedOrderBeforeAnotherSubmission() throws Exception {
+    @ParameterizedTest
+    @ValueSource(ints = {5, 6})
+    void shouldFreezeVersionedReferencesAndRejectChangedOrderBeforeAnotherSubmission(int version) throws Exception {
         when(modelMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(imageModel());
         when(beanDeductPort.getBalance(7L)).thenReturn(1000L);
         GenerationTask queuedTask = new GenerationTask();
@@ -86,7 +90,7 @@ class GenerationTaskServiceImplTest {
         doNothing().when(service).markStatus(anyString(), eq("QUEUED"), isNull(), isNull(), isNull());
         GenerateImageItem item = new GenerateImageItem();
         item.setSeq(1);
-        item.setContractVersion(5);
+        item.setContractVersion(version);
         item.setPlannedPrompt("[[ref:clothes]]提供白色上衣，[[ref:scene]]提供窗边环境。");
         item.setReferenceAttachmentIds(List.of("unused", "scene", "clothes"));
         item.setReferenceImageIndexes(List.of(3, 2));
@@ -94,8 +98,11 @@ class GenerationTaskServiceImplTest {
                 new ImageReferenceBinding("original", "scene", List.of("环境"), "primary"),
                 new ImageReferenceBinding("original", "clothes", List.of("服装"), "primary")));
         item.setVisibleTexts(List.of("图2：新品"));
-        item.setPrompt(ImagePromptCompiler.compileV5(item.getPlannedPrompt(), item.getReferenceBindings(),
-                item.getReferenceAttachmentIds(), item.getReferenceImageIndexes(), item.getVisibleTexts()));
+        item.setPrompt(version == 6
+                ? ImagePromptCompiler.compileV6(item.getPlannedPrompt(), item.getReferenceBindings(),
+                        item.getReferenceAttachmentIds(), item.getReferenceImageIndexes(), item.getVisibleTexts())
+                : ImagePromptCompiler.compileV5(item.getPlannedPrompt(), item.getReferenceBindings(),
+                        item.getReferenceAttachmentIds(), item.getReferenceImageIndexes(), item.getVisibleTexts()));
         List<String> refs = List.of("/profile/unused.jpg", "/profile/scene.jpg", "/profile/clothes.jpg");
         service.submitImageBatch(7L, 33L, 21L, List.of(item), null, "3:4", refs);
 
@@ -103,10 +110,11 @@ class GenerationTaskServiceImplTest {
         verify(service).createTask(anyString(), eq(7L), eq(33L), eq(21L), eq(9L), eq(item.getPrompt()),
                 eq(1), eq("2K"), eq("3:4"), anyString(), snapshot.capture());
         JsonNode stored = objectMapper.readTree(snapshot.getValue()).get(0);
-        assertThat(stored.path("contractVersion").asInt()).isEqualTo(5);
+        assertThat(stored.path("contractVersion").asInt()).isEqualTo(version);
         assertThat(stored.path("refImages").toString()).isEqualTo("[\"/profile/clothes.jpg\",\"/profile/scene.jpg\"]");
         assertThat(stored.path("prompt").asText()).contains("本任务输入图1提供白色上衣，本任务输入图2提供窗边环境");
         assertThat(stored.path("plannedPrompt").asText()).contains("[[ref:clothes]]");
+        assertThat(stored.path("prompt").asText().contains("【逐图属性隔离】")).isEqualTo(version == 6);
 
         item.setReferenceImageIndexes(List.of(2, 3));
         assertThatThrownBy(() -> service.submitImageBatch(7L, 33L, 21L, List.of(item), null, "3:4", refs))

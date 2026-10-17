@@ -19,16 +19,20 @@ let passed = 0
 async function check(name, test) { await test(); console.log(`通过：${name}`); passed++ }
 await check('切换与新建保留各会话消息、执行状态及模型选择', () => {
 	store.setModels(11, 21); store.setConversationId(1)
+	store.setImageResolution('4K')
 	store.addMessage({ role: 'user', content: 'A' }); store.setStreaming(true); store.setActiveMessageId('A-run')
 	store.reset(); store.setModels(12, 22); store.setConversationId(2); store.addMessage({ content: 'B' })
+	store.setImageResolution('2K')
 	assert.equal(store.getSession(1).messages[0].content, 'A'); assert.equal(store.getSession(1).streaming, true)
 	store.setConversationId(1); assert.equal(store.currentSession.modelId, 11); assert.equal(store.currentSession.imageModelId, 21)
 	assert.equal(store.getSession(2).messages[0].content, 'B'); assert.equal(store.getSession(2).modelId, 12)
+	assert.equal(store.currentSession.imageResolution, '4K'); assert.equal(store.getSession(2).imageResolution, '2K')
 })
 await check('重启恢复全部会话模型与执行标识，不持久化聊天全文', () => {
 	store.persist(); const cold = storeContext.useConversationStore()
 	assert.equal(cold.getSession(1).activeMessageId, 'A-run'); assert.equal(cold.getSession(2).imageModelId, 22)
 	assert.equal(cold.getSession(1).messages.length, 0); assert.equal(cold.getSession(1).streaming, false)
+	assert.equal(cold.getSession(1).imageResolution, '4K'); assert.equal(cold.getSession(2).imageResolution, '2K')
 })
 const chat = read('pages/index/ChatContent.vue')
 const script = chat.match(/<script setup>([\s\S]*?)<\/script>/)[1]
@@ -71,8 +75,10 @@ await check('显式停止只停止当前会话，其他会话保持运行', asyn
 })
 await check('恢复状态不重复添加已有流消息、不重复发起任务，参考图部分成功保留', () => {
 	const s = store.getSession(1); s.requestId = 'A'; s.messages = [aiA]
-	ctx.applyRunSnapshot(s, { runId: 'A', requestId: 'A', messageId: 101, status: 'GENERATING', text: 'restored', generationTasks: [{ taskId: 'img-a', n: 2, status: 'FAILED', resultUrls: JSON.stringify(['image-one', null]) }] })
+	s.imageModelId = 999; s.imageResolution = '1K' // A fresh device can initially select the current catalogue default.
+	ctx.applyRunSnapshot(s, { runId: 'A', requestId: 'A', messageId: 101, imageModelId: 21, imageResolution: '4K', status: 'GENERATING', text: 'restored', generationTasks: [{ taskId: 'img-a', n: 2, status: 'FAILED', resultUrls: JSON.stringify(['image-one', null]) }] })
 	assert.equal(s.messages.length, 1); assert.equal(s.messages[0].text, 'restored'); assert.equal(s.status, 'GENERATING')
+	assert.equal(s.imageModelId, 21); assert.equal(s.imageResolution, '4K')
 	assert.equal(s.messages[0].result.images[0].status, 'SUCCEEDED'); assert.equal(s.messages[0].result.images[1].status, 'FAILED')
 	assert.equal(store.conversationId, 2)
 })
@@ -186,10 +192,12 @@ await check('保存请求编号失败时阻止发起出图，不产生不可恢�
 await check('换账号清除所有会话元数据，不回显上一位用户', () => {
 	storage.set('user', { id: 2 }); assert.equal(store.syncOwner(), true)
 	assert.equal(store.conversationId, null); assert.equal(store.getSession(1).messages.length, 0); assert.equal(store.getSession(1).modelId, null)
+	assert.equal(store.getSession(1).imageResolution, '')
 })
 await check('聊天和独立出图请求均传所选模型，前端不提交费用', () => {
 	const send = fn('handleSend'); assert.match(send, /modelId: conversationStore.currentSession.modelId/); assert.match(send, /imageModelId: conversationStore.currentSession.imageModelId/)
 	assert.match(read('pages/create/CreateContent.vue'), /modelId: generationStore.modelId/)
+	assert.match(send, /imageResolution: conversationStore.currentSession.imageResolution/)
 	assert.doesNotMatch(send.slice(send.indexOf('const streamPayload')), /beanCosts:|beanPer|price:/)
 })
 await check('冷启动旧快照晚于新请求返回，不替换消息对象或清除生成态', async () => {
@@ -237,11 +245,12 @@ await check('旧账号的模型目录晚返回时不覆盖新账号列表和选�
 await check('冷启动待充值恢复错误文案、原消息续作记录，付款就绪状态不被覆盖', () => {
 	const session = store.getSession(601); session.messages = []; session.pendingResumeTask = null
 	const run = { runId: 'recharge', requestId: 'recharge', conversationId: 601, messageId: 701,
-		modelId: 11, imageModelId: 21, status: 'WAITING_RECHARGE', errorMessage: '豆子余额不足，请充值后再聊' }
+		modelId: 11, imageModelId: 21, imageResolution: '2K', status: 'WAITING_RECHARGE', errorMessage: '豆子余额不足，请充值后再聊' }
 	ctx.applyRunSnapshot(session, run)
 	assert.equal(session.messages.length, 1); assert.match(session.messages[0].text, /豆子余额不足/)
 	assert.equal(session.messages[0].rechargeRequired, true); assert.equal(session.recovering, false)
 	assert.equal(session.pendingResumeTask.sourceMessageId, 701); assert.equal(session.pendingResumeTask.ready, false)
+	assert.equal(session.imageResolution, '2K'); assert.equal(session.pendingResumeTask.imageResolution, '2K')
 	session.pendingResumeTask.ready = true; ctx.applyRunSnapshot(session, run)
 	assert.equal(session.pendingResumeTask.ready, true); assert.equal(session.messages.length, 1)
 	ctx.applyRunSnapshot(session, { ...run, status: 'COMPLETED', text: '已完成' })
@@ -272,7 +281,7 @@ await check('出图预算不足充值后新增确认消费原范围，保留原�
 	const session = store.getSession(604)
 	session.messages = []; session.pendingResumeTask = null
 	const run = { runId: 'image-budget', requestId: 'image-budget', conversationId: 604, messageId: 704,
-		modelId: 11, imageModelId: 21, status: 'WAITING_CONFIRMATION',
+		modelId: 11, imageModelId: 21, imageResolution: '2K', status: 'WAITING_CONFIRMATION',
 		clarification: { key: 'INSUFFICIENT_BALANCE', scopeId: 'original-scope', question: '需要充值后继续' } }
 	ctx.applyRunSnapshot(session, run)
 	assert.equal(session.pendingResumeTask.sourceMessageId, 704)
@@ -280,6 +289,7 @@ await check('出图预算不足充值后新增确认消费原范围，保留原�
 	assert.equal(session.pendingResumeTask.clarificationOptionId, 'generate_requested')
 	assert.equal(session.messages[0].rechargeRequired, true)
 	session.pendingResumeTask.ready = true
+	session.imageResolution = '4K' // Later UI changes must not alter the prepaid plan's resolution.
 	// The latest server snapshot may restore fields that are missing from old local metadata.
 	session.pendingResumeTask.clarificationScopeId = undefined
 	let submitted
@@ -295,6 +305,7 @@ await check('出图预算不足充值后新增确认消费原范围，保留原�
 	assert.equal(submitted.clarificationScopeId, 'original-scope'); assert.equal(submitted.clarificationOptionId, 'generate_requested')
 	assert.equal(submitted.message, '充值已到账，请按原计划继续生成'); assert.equal(session.messages.length, 3)
 	assert.equal(submitted.modelId, 11); assert.equal(submitted.imageModelId, 21)
+	assert.equal(submitted.imageResolution, '2K'); assert.equal(session.imageResolution, '4K')
 	assert.equal(session.messages[0].clarification.scopeId, 'original-scope')
 	assert.equal(session.messages[1].role, 'user'); assert.equal(session.pendingResumeTask, null)
 	ctx.applyRunSnapshot(session, { ...run, requestId: 'resume-image-budget', status: 'RUNNING', clarification: null })
@@ -382,6 +393,7 @@ await check('会话列表旧 run 状态不覆盖当前新 run，匹配 run 可�
 await check('新建请求途中切换账号或会话时，迟到响应不抢当前会话也不发送旧输入', async () => {
 	for (const accountChanged of [false, true]) {
 		store.reset(); store.setModels(11, 21)
+		store.setImageResolution('4K')
 		let resolveCreated, sent = false
 		const scope = vm.createContext({ conversationStore: store, disposed: false, sessionEpoch: 0, preparingConversation: ref(false),
 			interactionLocked: ref(false), isReferenceUploadPending: () => false, hasGeneratingImage: ref(false), inputText: ref('old prompt'),
@@ -396,7 +408,7 @@ await check('新建请求途中切换账号或会话时，迟到响应不抢当�
 		resolveCreated({ conversationId: accountChanged ? 817 : 816 }); await pending
 		assert.equal(store.conversationId, 815); assert.equal(sent, false); assert.equal(scope.preparingConversation.value, false)
 		if (accountChanged) assert.equal(store.sessions['817'], undefined)
-		else { assert.equal(store.getSession(816).modelId, 11); assert.equal(store.getSession(816).draft.text, 'old prompt') }
+		else { assert.equal(store.getSession(816).modelId, 11); assert.equal(store.getSession(816).draft.text, 'old prompt'); assert.equal(store.getSession(816).imageResolution, '4K') }
 	}
 })
 await check('迟到创建保留本轮文本、参考图顺序与引用、skill 和已选选项', async () => {
@@ -466,8 +478,40 @@ await check('模型卡片、选择列表和计费弹窗只展示公开档位，�
 	props.models = []
 	assert.equal(scope.view.displayName.value, '请选择档位')
 })
+await check('分辨率仅提供所选档位支持的配置，按 1K、2K、4K 排序并显示实际豆价', () => {
+	const scope = vm.createContext({})
+	vm.runInContext(read('utils/image-resolution.js').replace(/export function /g, 'function '), scope)
+	const model = { resolutions: ['4K', '1K', '2K', '8K'], defaultResolution: '2K', beanCosts: { '1K': 6, '2K': 8, '4K': 10 } }
+	assert.deepEqual(Array.from(scope.imageResolutionOptions(model), (option) => option.label), ['1K · 6 豆/张', '2K · 8 豆/张', '4K · 10 豆/张'])
+	assert.equal(scope.chooseImageResolution(model, ''), '2K')
+	assert.equal(scope.chooseImageResolution(model, '4K'), '4K')
+	assert.equal(scope.chooseImageResolution({ ...model, resolutions: ['1K'] }, '4K'), '1K')
+	assert.equal(scope.chooseImageResolution(null, '4K'), '')
+	assert.equal(scope.imageResolutionOptions({ resolutions: ['1K'], beanCosts: { '1K': null } })[0].beans, null)
+	assert.match(chat, /class="chat-model-slot" v-if="chatModels.length > 1"/)
+	assert.match(chat, /<ImageResolutionSelector[^>]*:options="chatImageResolutionOptions"/)
+})
+await check('分辨率选择传选项值，生成中不改设置；最多九张可选', () => {
+	const source = read('components/common/ImageResolutionSelector.vue')
+	const { descriptor } = parse(source)
+	const props = reactive({ options: [{ value: '1K', beans: 6 }, { value: '2K', beans: 8 }, { value: '4K', beans: 10 }], modelValue: '2K', disabled: false, loading: false })
+	let emitted
+	const scope = vm.createContext({ computed, defineProps: () => props, defineEmits: () => (...args) => { emitted = args } })
+	vm.runInContext(descriptor.scriptSetup.content.replace(/^import .*$/gm, '') + '\nvar view = { selected, select }', scope)
+	assert.equal(scope.view.selected.value.beans, 8)
+	scope.view.select({ detail: { value: 2 } }); assert.deepEqual(emitted, ['update:modelValue', '4K'])
+	props.disabled = true; emitted = null; scope.view.select({ detail: { value: 0 } }); assert.equal(emitted, null)
+	for (const file of ['pages/create/CreateContent.vue', 'pages/cases/components/UseTemplateModal.vue']) {
+		const create = read(file).match(/<script setup>([\s\S]*?)<\/script>/)[1]
+		const ast = parseJavaScript(create, { sourceType: 'module' })
+		const declaration = ast.program.body.find((node) => node.type === 'VariableDeclaration' && node.declarations.some((item) => item.id.name === 'countOptions'))
+		const countScope = vm.createContext({})
+		vm.runInContext(create.slice(declaration.start, declaration.end) + '\nvar counts = countOptions', countScope)
+		assert.deepEqual(Array.from(countScope.counts), [1, 2, 3, 4, 5, 6, 7, 8, 9], file)
+	}
+})
 await check('Vue 脚本与模板可编译', () => {
-	for (const file of ['pages/index/ChatContent.vue', 'pages/index/components/HistoryOverlay.vue', 'pages/create/CreateContent.vue', 'components/common/ModelSelector.vue']) {
+	for (const file of ['pages/index/ChatContent.vue', 'pages/index/components/HistoryOverlay.vue', 'pages/create/CreateContent.vue', 'components/common/ModelSelector.vue', 'components/common/ImageResolutionSelector.vue', 'pages/create/components/RefImageUploader.vue', 'pages/cases/components/UseTemplateModal.vue']) {
 		const { descriptor, errors } = parse(read(file), { filename: file }); assert.equal(errors.length, 0)
 		const compiled = compileScript(descriptor, { id: file })
 		const result = compileTemplate({ source: descriptor.template.content, filename: file, id: file, compilerOptions: { bindingMetadata: compiled.bindings } })

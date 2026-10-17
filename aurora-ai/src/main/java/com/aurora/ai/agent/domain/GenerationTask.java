@@ -78,7 +78,7 @@ public class GenerationTask implements Serializable {
     private String prompt;
 
     /**
-     * 张数(1~9；生成页入口仍限制 1~4)
+     * 张数(1~9)
      */
     private Integer n;
 

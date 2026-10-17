@@ -20,6 +20,7 @@ import java.util.Set;
 
 @Component
 public class LuxaiImageClient {
+    public static final long MAX_REFERENCE_BYTES = 50L * 1024 * 1024;
     private static final int TIMEOUT_SECONDS = 1000;
     private static final Set<String> QUALITIES = Set.of("auto", "low", "medium", "high", "xhigh", "max");
     private static final ObjectMapper IMAGE_JSON = new ObjectMapper(JsonFactory.builder()
@@ -69,7 +70,7 @@ public class LuxaiImageClient {
             byte[] bytes = references.get(index);
             if (bytes == null || bytes.length < 4) throw new ServiceException("参考图为空或格式无效");
             totalBytes += bytes.length;
-            if (totalBytes > 50L * 1024 * 1024) throw new ServiceException("参考图总大小不能超过50MB");
+            if (totalBytes > MAX_REFERENCE_BYTES) throw new ServiceException("参考图总大小不能超过50MB");
             String contentType;
             String extension;
             if ((bytes[0] & 255) == 137 && bytes[1] == 80 && bytes[2] == 78 && bytes[3] == 71) {

@@ -11,6 +11,7 @@ function newSession(id, saved = {}) {
 	return { conversationId: id, messages: [], streaming: false, recovering: false,
 		activeMessageId: saved.activeMessageId || null, requestId: null, currentThinking: '',
 		modelId: saved.modelId || null, imageModelId: saved.imageModelId || null,
+		imageResolution: saved.imageResolution || '',
 		pendingResumeTask: saved.pendingResumeTask || null, status: saved.status || '',
 		draft: null, pendingClarification: null, nextCursor: null, hasMore: false }
 }
@@ -32,7 +33,8 @@ export const useConversationStore = defineStore('conversation', () => {
 		const metadata = {}
 		Object.entries(sessions).forEach(([key, s]) => { metadata[key] = {
 			conversationId: s.conversationId, activeMessageId: s.activeMessageId,
-			modelId: s.modelId, imageModelId: s.imageModelId, pendingResumeTask: s.pendingResumeTask, status: s.status,
+			modelId: s.modelId, imageModelId: s.imageModelId, imageResolution: s.imageResolution,
+			pendingResumeTask: s.pendingResumeTask, status: s.status,
 		} })
 		write(STORAGE_KEY, { owner: owner.value, activeId: conversationId.value, sessions: metadata })
 	}
@@ -59,6 +61,9 @@ export const useConversationStore = defineStore('conversation', () => {
 	function setModels(modelId, imageModelId, conversation = conversationId.value) {
 		const s = getSession(conversation); s.modelId = modelId; s.imageModelId = imageModelId; persist()
 	}
+	function setImageResolution(value, conversation = conversationId.value) {
+		getSession(conversation).imageResolution = value || ''; persist()
+	}
 	function replaceMessages(list) { currentSession.value.messages = Array.isArray(list) ? list : [] }
 	function replaceConversationSnapshot(id, list) { setConversationId(id); replaceMessages(list) }
 	function addMessage(message) { currentSession.value.messages.push(message) }
@@ -74,7 +79,7 @@ export const useConversationStore = defineStore('conversation', () => {
 	function takePromptDraft() { const value = promptDraft.value; promptDraft.value = null; return value }
 	function reset() { sessions.draft = newSession(null); conversationId.value = null; persist() }
 	return { conversationId, sessions, currentSession, messages, streaming, currentThinking, activeMessageId,
-		pendingResumeTask, promptDraft, getSession, persist, syncOwner, setModels, setConversationId,
+		pendingResumeTask, promptDraft, getSession, persist, syncOwner, setModels, setImageResolution, setConversationId,
 		setActiveMessageId, setStreaming, replaceMessages, replaceConversationSnapshot, addMessage, appendText,
 		prependMessages, setPendingResumeTask, clearPendingResumeTask, markPendingResumeReady, setPromptDraft, takePromptDraft, reset }
 })
